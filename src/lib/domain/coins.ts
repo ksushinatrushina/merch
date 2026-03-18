@@ -1,0 +1,51 @@
+import type { MonthlyGiftQuota, User } from "@/lib/domain/types";
+
+export const MONTHLY_GIFT_LIMIT = 25;
+
+export function assertAdminCanGrantCoins(actor: User) {
+  if (actor.role !== "ADMIN") {
+    throw new Error("Только администратор может начислять коины.");
+  }
+}
+
+export function assertEnoughCoins(balance: number, amount: number) {
+  if (amount <= 0) {
+    throw new Error("Сумма должна быть больше нуля.");
+  }
+
+  if (balance < amount) {
+    throw new Error("Недостаточно коинов.");
+  }
+}
+
+export function assertGiftTransferAllowed(params: {
+  sender: User;
+  recipient: User;
+  amount: number;
+  quota: MonthlyGiftQuota;
+}) {
+  const { sender, recipient, amount, quota } = params;
+
+  if (sender.role !== "EMPLOYEE") {
+    throw new Error("Подарки коллегам доступны только сотрудникам.");
+  }
+
+  if (sender.id === recipient.id) {
+    throw new Error("Нельзя отправить коины самому себе.");
+  }
+
+  if (amount <= 0) {
+    throw new Error("Сумма должна быть больше нуля.");
+  }
+
+  const nextTotal = quota.sentCoins + amount;
+  if (nextTotal > MONTHLY_GIFT_LIMIT) {
+    throw new Error(
+      `Превышен лимит подарков. В месяц можно подарить максимум ${MONTHLY_GIFT_LIMIT} коинов.`,
+    );
+  }
+}
+
+export function remainingGiftCoins(quota: MonthlyGiftQuota) {
+  return Math.max(MONTHLY_GIFT_LIMIT - quota.sentCoins, 0);
+}
