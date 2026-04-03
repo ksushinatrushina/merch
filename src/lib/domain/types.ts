@@ -1,4 +1,4 @@
-export type Role = "ADMIN" | "EMPLOYEE";
+export type Role = "ADMIN" | "EMPLOYEE" | "ORDER_MANAGER";
 
 export type User = {
   id: string;
@@ -9,6 +9,7 @@ export type User = {
   role: Role;
   coinBalance: number;
   birthday?: string;
+  employmentStartDate?: string;
   jobTitle?: string;
   team?: string;
   location?: string;

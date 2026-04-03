@@ -4,7 +4,13 @@ export const MONTHLY_GIFT_LIMIT = 25;
 
 export function assertAdminCanGrantCoins(actor: User) {
   if (actor.role !== "ADMIN") {
-    throw new Error("Только администратор может начислять коины.");
+    throw new Error("Только администратор может управлять мерчиками.");
+  }
+}
+
+export function assertCanManageOrders(actor: User) {
+  if (!["ADMIN", "ORDER_MANAGER"].includes(actor.role)) {
+    throw new Error("Недостаточно прав для управления заказами.");
   }
 }
 
@@ -14,7 +20,7 @@ export function assertEnoughCoins(balance: number, amount: number) {
   }
 
   if (balance < amount) {
-    throw new Error("Недостаточно коинов.");
+    throw new Error("Недостаточно мерчиков.");
   }
 }
 
@@ -26,8 +32,8 @@ export function assertGiftTransferAllowed(params: {
 }) {
   const { sender, recipient, amount, quota } = params;
 
-  if (sender.role !== "EMPLOYEE") {
-    throw new Error("Подарки коллегам доступны только сотрудникам.");
+  if (!["EMPLOYEE", "ADMIN", "ORDER_MANAGER"].includes(sender.role)) {
+    throw new Error("Благодарности доступны только сотрудникам и администраторам.");
   }
 
   if (sender.id === recipient.id) {
@@ -41,7 +47,7 @@ export function assertGiftTransferAllowed(params: {
   const nextTotal = quota.sentCoins + amount;
   if (nextTotal > MONTHLY_GIFT_LIMIT) {
     throw new Error(
-      `Превышен лимит подарков. В месяц можно подарить максимум ${MONTHLY_GIFT_LIMIT} коинов.`,
+      `Превышен лимит благодарностей. В месяц можно отправить максимум ${MONTHLY_GIFT_LIMIT} мерчиков.`,
     );
   }
 }

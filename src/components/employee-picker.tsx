@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { User } from "@/lib/domain/types";
+import { formatEmployees } from "@/lib/russian";
 
 type EmployeePickerProps = {
   employees: User[];
@@ -161,7 +162,7 @@ export function EmployeePicker({
       </label>
 
       <div className="employee-picker-meta">
-        <span>{isLoading ? "Ищем сотрудников..." : `Найдено: ${options.length}`}</span>
+        <span>{isLoading ? "Ищем сотрудников..." : `Найдено: ${formatEmployees(options.length)}`}</span>
         {searchError ? <span className="employee-picker-error">{searchError}</span> : null}
       </div>
 

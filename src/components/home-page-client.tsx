@@ -35,14 +35,15 @@ import type {
   ReactionKey,
 } from "@/lib/app-types";
 import { MONTHLY_GIFT_LIMIT, remainingGiftCoins } from "@/lib/domain/coins";
-import type { CartLine, MerchItem, MonthlyGiftQuota, User } from "@/lib/domain/types";
+import type { CartLine, MerchItem, MonthlyGiftQuota, Role, User } from "@/lib/domain/types";
 import { currentUser } from "@/lib/mock-data";
+import { formatEmployees, formatMerchiki, formatOrders, pluralizeRu } from "@/lib/russian";
 
 type ViewMode = "EMPLOYEE" | "ADMIN";
 type StatusTone = "warning" | "success" | "neutral";
 type GiftReason = "Помощь в релизе" | "Отличная презентация" | "Поддержка команды";
 type EmployeeTab = "PROFILE" | "STORE" | "HISTORY";
-type AdminTab = "GRANTS" | "CATALOG" | "ORDERS";
+type AdminTab = "GRANTS" | "CATALOG" | "ORDERS" | "ADMINS";
 
 type StatusState = {
   title: string;
@@ -83,11 +84,6 @@ type CropDragState = {
 type CatalogEditorDraft = MerchItem;
 type CartEntry = CartLine & { size: string };
 
-type AdminAnalytics = {
-  label: string;
-  value: string;
-};
-
 type CheckoutDeliveryState = {
   method: OrderDeliveryMethod;
   address: string;
@@ -112,6 +108,56 @@ type PhotoUploadState = {
   width?: number;
   height?: number;
 };
+
+type GrantImportState = {
+  detail: string;
+  error?: string;
+  fileName?: string;
+  importedCount?: number;
+  phase: "idle" | "processing" | "done" | "error";
+  processed?: number;
+  total?: number;
+};
+
+type GrantImportRow = {
+  amount: number;
+  reason: string;
+  recipient: string;
+};
+
+type GrantImportPreview = {
+  fileName: string;
+  rows: GrantImportRow[];
+  sample: GrantImportRow[];
+};
+
+type GrantOperation = "grant" | "deduct";
+
+type BulkActionState = {
+  detail: string;
+  phase: "idle" | "processing" | "done" | "error";
+  processed?: number;
+  title: string;
+  total?: number;
+};
+
+function isFullAdmin(role: Role) {
+  return role === "ADMIN";
+}
+
+function canManageOrders(role: Role) {
+  return role === "ADMIN" || role === "ORDER_MANAGER";
+}
+
+function roleLabel(role: Role) {
+  if (role === "ADMIN") {
+    return "Администратор";
+  }
+  if (role === "ORDER_MANAGER") {
+    return "Менеджер доставки заказов";
+  }
+  return "Сотрудник";
+}
 
 type AuthResponse = {
   user: User;
@@ -463,13 +509,96 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
+function detectGrantTableDelimiter(text: string) {
+  const headerLine = text.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "";
+  if (headerLine.includes("\t")) {
+    return "\t";
+  }
+  if (headerLine.includes(";")) {
+    return ";";
+  }
+  return ",";
+}
+
+function normalizeGrantHeader(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function parseGrantTable(text: string): GrantImportRow[] {
+  const delimiter = detectGrantTableDelimiter(text);
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return [];
+  }
+
+  const parseColumns = (line: string) => line.split(delimiter).map((column) => column.trim());
+  const firstRow = parseColumns(lines[0]);
+  const normalizedHeaders = firstRow.map(normalizeGrantHeader);
+  const hasHeader = normalizedHeaders.some((header) =>
+    [
+      "получатель",
+      "сотрудник",
+      "email",
+      "почта",
+      "name",
+      "username",
+      "логин",
+      "мерчики",
+      "мерчики сумма",
+      "сумма",
+      "amount",
+      "coins",
+      "коины",
+      "причина",
+      "reason",
+      "комментарий",
+    ].includes(header),
+  );
+
+  const headerIndexes = hasHeader
+    ? {
+        recipient: normalizedHeaders.findIndex((header) =>
+          ["получатель", "сотрудник", "email", "почта", "name", "username", "логин"].includes(header),
+        ),
+        amount: normalizedHeaders.findIndex((header) =>
+          ["мерчики", "мерчики сумма", "сумма", "amount", "coins", "коины"].includes(header),
+        ),
+        reason: normalizedHeaders.findIndex((header) =>
+          ["причина", "reason", "комментарий"].includes(header),
+        ),
+      }
+    : { recipient: 0, amount: 1, reason: 2 };
+
+  return lines
+    .slice(hasHeader ? 1 : 0)
+    .map(parseColumns)
+    .map((columns) => {
+      const recipient = columns[headerIndexes.recipient] ?? "";
+      const amountValue = (columns[headerIndexes.amount] ?? "").replace(/[^\d-]/g, "");
+      const reason = columns[headerIndexes.reason] ?? "";
+      return {
+        recipient,
+        amount: Number(amountValue),
+        reason,
+      };
+    })
+    .filter((row) => row.recipient.trim().length > 0 && Number.isFinite(row.amount) && row.amount > 0);
+}
+
+function createBulkActionState(title: string, detail: string, phase: BulkActionState["phase"], processed?: number, total?: number): BulkActionState {
+  return { title, detail, phase, processed, total };
+}
+
 export default function HomePageClient({
   initialAdminTab = "GRANTS",
-  initialEmployeeTab = "PROFILE",
+  initialEmployeeTab = "STORE",
   initialMode = "EMPLOYEE",
 }: HomePageClientProps) {
   const [mode, setMode] = useState<ViewMode>(initialMode);
-  const [adminTab, setAdminTab] = useState<AdminTab>(initialAdminTab);
   const [employeeTab, setEmployeeTab] = useState<EmployeeTab>(initialEmployeeTab);
   const [sessionUserId, setSessionUserId] = useState<string | null>(null);
   const [loginUsername, setLoginUsername] = useState("");
@@ -484,14 +613,22 @@ export default function HomePageClient({
   const [quota, setQuota] = useState<MonthlyGiftQuota>(initialSnapshot.quota);
   const [catalog, setCatalog] = useState<MerchItem[]>(initialSnapshot.catalog);
   const [selectedRecipientId, setSelectedRecipientId] = useState<string>(
-    initialUsers.find((user) => user.role === "EMPLOYEE" && user.id !== employeeId)?.id ?? "",
+    initialUsers.find((user) => user.id !== employeeId)?.id ?? "",
   );
   const [giftAmount, setGiftAmount] = useState<string>("5");
   const [giftReason, setGiftReason] = useState<GiftReason>("Помощь в релизе");
   const [giftMessage, setGiftMessage] = useState<string>("");
   const [grantAmount, setGrantAmount] = useState<number>(20);
+  const [grantOperation, setGrantOperation] = useState<GrantOperation>("grant");
   const [grantReason, setGrantReason] = useState<string>("");
   const [selectedGrantEmployeeIds, setSelectedGrantEmployeeIds] = useState<string[]>([]);
+  const [grantImportPreview, setGrantImportPreview] = useState<GrantImportPreview | null>(null);
+  const [grantImportState, setGrantImportState] = useState<GrantImportState>({
+    phase: "idle",
+    detail: "Выберите файл, чтобы проверить строки перед загрузкой.",
+  });
+  const [catalogBulkState, setCatalogBulkState] = useState<BulkActionState | null>(null);
+  const [orderBulkState, setOrderBulkState] = useState<BulkActionState | null>(null);
   const [status, setStatus] = useState<StatusState>({ title: "", detail: "", tone: "neutral" });
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [toastMessage, setToastMessage] = useState<string>("");
@@ -536,17 +673,39 @@ export default function HomePageClient({
   const viewerUserId = sessionUser?.id ?? employeeId;
   const employee = users.find((user) => user.id === viewerUserId) ?? currentUser;
   const activeUser = sessionUser ?? employee;
-  const canAccessAdmin = activeUser.role === "ADMIN";
+  const canAccessFullAdmin = isFullAdmin(activeUser.role);
+  const canAccessOrdersAdmin = canManageOrders(activeUser.role);
+  const canAccessAdmin = canAccessOrdersAdmin;
+  const adminTab = canAccessFullAdmin ? initialAdminTab : "ORDERS";
   const grantRecipients = users;
   const availableGiftCoins = remainingGiftCoins(quota);
   const sentCoins = MONTHLY_GIFT_LIMIT - availableGiftCoins;
   const unreadNotifications = notifications.filter((item) => item.unread).length;
   const daysUntilReset = 20;
   const giftCoinsUsed = quota.sentCoins;
-  const latestThanks = gratitudeFeed.filter((item) => item.to === employee.name).slice(0, 4);
-  const profileGratitudeEvents = gratitudeFeed
-    .filter((item) => item.to === employee.name || item.from === employee.name)
+  const latestThanks = gratitudeFeed
+    .filter(
+      (item) =>
+        item.receiverId === employee.id ||
+        item.receiverName === employee.name ||
+        item.to === employee.name,
+    )
     .slice(0, 4);
+  const allProfileGratitudeEvents = gratitudeFeed.filter(
+    (item) =>
+      item.receiverId === employee.id ||
+      item.senderId === employee.id ||
+      item.receiverName === employee.name ||
+      item.senderName === employee.name ||
+      item.to === employee.name ||
+      item.from === employee.name,
+  );
+  const profileGratitudeEvents = allProfileGratitudeEvents.slice(0, 4);
+  const profileOrders = orders.filter(
+    (order) =>
+      order.customerId === employee.id ||
+      order.customerName === employee.name,
+  );
   const storeCategories = useMemo(() => {
     const dynamicCategories = catalog
       .map((item) => item.category?.trim())
@@ -564,6 +723,7 @@ export default function HomePageClient({
     return `${user.name} ${user.email} ${user.username ?? ""} ${user.team ?? ""}`.toLowerCase().includes(query);
   });
   const adminUsers = users.filter((user) => user.role === "ADMIN");
+  const orderManagerUsers = users.filter((user) => user.role === "ORDER_MANAGER");
   const visibleItems = useMemo(() => {
     const filtered = catalog
       .filter((item) => item.isActive)
@@ -630,55 +790,11 @@ export default function HomePageClient({
       sent: history
         .filter((entry) => entry.amount < 0 && !entry.title.startsWith("Покупка:"))
         .reduce((sum, entry) => sum + Math.abs(entry.amount), 0),
-      purchases: orders.length,
+      purchases: profileOrders.length,
       thanks: gratitudeFeed.filter((item) => item.to === employee.name).length + 7,
     }),
-    [employee.name, gratitudeFeed, history, orders.length],
+    [employee.name, gratitudeFeed, history, profileOrders.length],
   );
-
-  const analytics: AdminAnalytics[] = useMemo(() => {
-    const topCatalogItem = [...catalog]
-      .sort((left, right) => (right.popularity ?? 0) - (left.popularity ?? 0))
-      .find((item) => item.isActive);
-
-    const gratitudeLeaders = Object.entries(
-      gratitudeFeed.reduce<Record<string, number>>((accumulator, post) => {
-        const receiverName = post.receiverName ?? post.to;
-        if (!receiverName) {
-          return accumulator;
-        }
-        accumulator[receiverName] = (accumulator[receiverName] ?? 0) + post.amount;
-        return accumulator;
-      }, {}),
-    ).sort((left, right) => right[1] - left[1]);
-
-    const latestOrderDate = orders[0]?.date ?? null;
-    const recentHistoryCount = latestOrderDate
-      ? history.filter((entry) => entry.date === latestOrderDate).length
-      : history.length;
-    const recentGrantCount = latestOrderDate
-      ? grantHistory.filter((entry) => entry.date === latestOrderDate).length
-      : grantHistory.length;
-    const recentFeedCount = latestOrderDate
-      ? gratitudeFeed.filter((entry) => entry.date === latestOrderDate).length
-      : gratitudeFeed.length;
-    const totalActivity = recentHistoryCount + recentGrantCount + recentFeedCount;
-
-    return [
-      {
-        label: "Самый популярный товар",
-        value: topCatalogItem ? `${topCatalogItem.title} · ${topCatalogItem.popularity ?? 0} огоньков` : "Нет данных",
-      },
-      {
-        label: "Топ благодарностей",
-        value: gratitudeLeaders[0] ? `${gratitudeLeaders[0][0]} · ${gratitudeLeaders[0][1]} коинов` : "Нет данных",
-      },
-      {
-        label: "Активность сотрудников",
-        value: `${totalActivity} событий${latestOrderDate ? ` · ${latestOrderDate}` : ""}`,
-      },
-    ];
-  }, [catalog, gratitudeFeed, grantHistory, history, orders]);
 
   const filteredAdminCatalog = useMemo(() => {
     const query = catalogSearch.trim().toLowerCase();
@@ -746,14 +862,10 @@ export default function HomePageClient({
       return;
     }
 
-    if (sessionUser.role !== "ADMIN" && mode === "ADMIN") {
+    if (!canManageOrders(sessionUser.role) && mode === "ADMIN") {
       setMode("EMPLOYEE");
     }
-  }, [initialMode, sessionUser]);
-
-  useEffect(() => {
-    setAdminTab(initialAdminTab);
-  }, [initialAdminTab]);
+  }, [initialMode, mode, sessionUser]);
 
   useEffect(() => {
     setEmployeeTab(initialEmployeeTab);
@@ -1061,12 +1173,12 @@ export default function HomePageClient({
     const parsedGiftAmount = Number.parseInt(giftAmount, 10);
 
     if (!recipient) {
-      setWarningStatus("Не удалось отправить коины", "Не найден отправитель или получатель.");
+      setWarningStatus("Не удалось отправить мерчики", "Не найден отправитель или получатель.");
       return;
     }
 
     if (!Number.isFinite(parsedGiftAmount) || parsedGiftAmount <= 0) {
-      setWarningStatus("Не удалось отправить коины", "Введите количество коинов больше нуля.");
+      setWarningStatus("Не удалось отправить мерчики", "Введите количество мерчиков больше нуля.");
       return;
     }
 
@@ -1083,12 +1195,12 @@ export default function HomePageClient({
       });
       applySnapshot(snapshot);
       triggerCoinBurst();
-      setSuccessStatus("Коины отправлены", `${recipient.name} получил ${parsedGiftAmount} коинов.`);
-      showToast(`+${parsedGiftAmount} коинов отправлено`);
+      setSuccessStatus("Мерчики отправлены", `${recipient.name} получил ${formatMerchiki(parsedGiftAmount)}.`);
+      showToast(`+${formatMerchiki(parsedGiftAmount)} отправлено`);
       setGiftMessage("");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Не удалось отправить коины.";
-      setWarningStatus("Не удалось отправить коины", message);
+      const message = error instanceof Error ? error.message : "Не удалось отправить мерчики.";
+      setWarningStatus("Не удалось отправить мерчики", message);
     }
   }
 
@@ -1134,7 +1246,7 @@ export default function HomePageClient({
       const priceGap = item.priceCoins * quantity - employee.coinBalance;
       const fallback = error instanceof Error ? error.message : "Не удалось оформить заказ.";
       if (priceGap > 0) {
-        setWarningStatus("Недостаточно коинов", `Не хватает ${priceGap} коинов`);
+        setWarningStatus("Недостаточно мерчиков", `Не хватает ${formatMerchiki(priceGap)}`);
       } else {
         setWarningStatus("Не удалось оформить заказ", fallback);
       }
@@ -1190,6 +1302,7 @@ export default function HomePageClient({
     });
 
     setCartOpen(true);
+    setExpandedStoreItemId(null);
     showToast("Товар добавлен в корзину");
   }
 
@@ -1291,17 +1404,19 @@ export default function HomePageClient({
   async function handleGrantCoins(options?: { skipThresholdConfirm?: boolean; skipReasonConfirm?: boolean }) {
     try {
       const recipients = users.filter((user) => selectedGrantEmployeeIds.includes(user.id));
+      const isDeduction = grantOperation === "deduct";
+      const operationLabel = isDeduction ? "списания" : "начисления";
       if (recipients.length === 0) {
         throw new Error("Выберите хотя бы одного получателя.");
       }
       if (!Number.isInteger(grantAmount) || grantAmount <= 0) {
-        throw new Error("Укажите количество коинов.");
+        throw new Error("Укажите количество мерчиков.");
       }
       const totalGrantAmount = grantAmount * recipients.length;
       if ((grantAmount >= 100 || totalGrantAmount >= 500) && !options?.skipThresholdConfirm) {
         setConfirmDialog({
-          title: "Проверьте сумму начисления",
-          detail: `${grantAmount} × ${recipients.length} = ${totalGrantAmount} коинов. Продолжить?`,
+          title: `Проверьте сумму ${operationLabel}`,
+          detail: `${grantAmount} × ${recipients.length} = ${formatMerchiki(totalGrantAmount)}. Продолжить?`,
           confirmLabel: "Продолжить",
           cancelLabel: "Отмена",
           onConfirm: () => {
@@ -1314,8 +1429,8 @@ export default function HomePageClient({
       if (!grantReason.trim() && !options?.skipReasonConfirm) {
         setConfirmDialog({
           title: "Причина не указана",
-          detail: "Начислить коины без причины?",
-          confirmLabel: "Начислить",
+          detail: isDeduction ? "Списать мерчики без причины?" : "Начислить мерчики без причины?",
+          confirmLabel: isDeduction ? "Списать" : "Начислить",
           cancelLabel: "Отмена",
           onConfirm: () => {
             setConfirmDialog(null);
@@ -1330,6 +1445,7 @@ export default function HomePageClient({
           actorId: viewerUserId,
           employeeIds: selectedGrantEmployeeIds,
           coins: grantAmount,
+          operation: grantOperation,
           reason: grantReason,
         }),
       });
@@ -1337,38 +1453,266 @@ export default function HomePageClient({
       setSelectedGrantEmployeeIds([]);
       setGrantReason("");
       setSuccessStatus(
-        "Коины начислены",
+        isDeduction ? "Мерчики списаны" : "Мерчики начислены",
         recipients.length === 1
-          ? `${recipients[0]?.name} получил ${grantAmount} коинов.`
-          : `Начисление выполнено для ${recipients.length} пользователей.`,
+          ? isDeduction
+            ? `У ${recipients[0]?.name} списано ${formatMerchiki(grantAmount)}.`
+            : `${recipients[0]?.name} получил ${formatMerchiki(grantAmount)}.`
+          : isDeduction
+            ? `Списание выполнено для ${formatEmployees(recipients.length)}.`
+            : `Начисление выполнено для ${formatEmployees(recipients.length)}.`,
       );
-      showToast(`Начислено ${grantAmount} коинов`);
+      showToast(`${isDeduction ? "Списано" : "Начислено"} ${formatMerchiki(grantAmount)}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Не удалось начислить коины.";
-      setWarningStatus("Не удалось начислить коины", message);
+      const message = error instanceof Error ? error.message : `Не удалось выполнить ${grantOperation === "deduct" ? "списание" : "начисление"}.`;
+      setWarningStatus(`Не удалось выполнить ${grantOperation === "deduct" ? "списание" : "начисление"}`, message);
     }
+  }
+
+  async function handleGrantImport(file: File | null) {
+    if (!file) {
+      return;
+    }
+
+    try {
+      const rows = parseGrantTable(await file.text());
+      if (rows.length === 0) {
+        throw new Error("В таблице не найдено строк с получателем и количеством мерчиков.");
+      }
+      setGrantImportPreview({
+        fileName: file.name,
+        rows,
+        sample: rows.slice(0, 5),
+      });
+      setGrantImportState({
+        phase: "idle",
+        detail: `Проверка пройдена. Найдено ${rows.length} ${rows.length === 1 ? "строка" : rows.length >= 2 && rows.length <= 4 ? "строки" : "строк"} для импорта.`,
+        fileName: file.name,
+        processed: rows.length,
+        total: rows.length,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось обработать таблицу.";
+      setGrantImportPreview(null);
+      setGrantImportState({
+        phase: "error",
+        detail: "Таблицу не удалось загрузить.",
+        error: message,
+        fileName: file.name,
+      });
+      setWarningStatus("Не удалось загрузить таблицу", message);
+    }
+  }
+
+  function clearGrantImportPreview() {
+    setGrantImportPreview(null);
+    setGrantImportState({
+      phase: "idle",
+      detail: "Выберите файл, чтобы проверить строки перед загрузкой.",
+    });
+  }
+
+  function downloadGrantTemplate() {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    const templateLine =
+      grantOperation === "deduct"
+        ? "получатель,мерчики,причина\nanna@company.test,50,Корректировка баланса\n"
+        : "получатель,мерчики,причина\nanna@company.test,50,Бонус за релиз\n";
+
+    const blob = new Blob([templateLine], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = grantOperation === "deduct" ? "deduct-template.csv" : "grant-template.csv";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  async function confirmGrantImport() {
+    if (!grantImportPreview) {
+      return;
+    }
+
+    const resolvedUsers = users.map((user) => ({
+      user,
+      email: user.email.trim().toLowerCase(),
+      name: user.name.trim().toLowerCase(),
+      username: (user.username ?? "").trim().toLowerCase(),
+    }));
+
+    let processed = 0;
+    let importedCount = 0;
+    let lastSnapshot: AppSnapshot | null = null;
+    const skipped: string[] = [];
+
+    setGrantImportState({
+      phase: "processing",
+      detail: "Обрабатываем строки таблицы.",
+      fileName: grantImportPreview.fileName,
+      importedCount: 0,
+      processed: 0,
+      total: grantImportPreview.rows.length,
+    });
+
+    for (const row of grantImportPreview.rows) {
+      const recipientKey = row.recipient.trim().toLowerCase();
+      const matchedUser = resolvedUsers.find(
+        ({ email, name, username }) =>
+          recipientKey === email || recipientKey === name || recipientKey === username,
+      )?.user;
+
+      if (!matchedUser) {
+        skipped.push(`Не найден получатель: ${row.recipient}`);
+        processed += 1;
+        setGrantImportState({
+          phase: "processing",
+          detail: "Обрабатываем строки таблицы.",
+          error: skipped[0],
+          fileName: grantImportPreview.fileName,
+          importedCount,
+          processed,
+          total: grantImportPreview.rows.length,
+        });
+        continue;
+      }
+
+      try {
+        lastSnapshot = await apiRequest<AppSnapshot>("/api/admin/grant", {
+          method: "POST",
+            body: JSON.stringify({
+              actorId: viewerUserId,
+              employeeIds: [matchedUser.id],
+              coins: row.amount,
+              operation: grantOperation,
+              reason: row.reason,
+            }),
+          });
+        importedCount += 1;
+      } catch (error) {
+        skipped.push(error instanceof Error ? error.message : `Не удалось начислить ${row.recipient}.`);
+      } finally {
+        processed += 1;
+        setGrantImportState({
+          phase: "processing",
+          detail: "Обрабатываем строки таблицы.",
+          error: skipped[0],
+          fileName: grantImportPreview.fileName,
+          importedCount,
+          processed,
+          total: grantImportPreview.rows.length,
+        });
+      }
+    }
+
+    if (lastSnapshot) {
+      applySnapshot(lastSnapshot);
+    }
+
+    if (importedCount === 0) {
+      const message = skipped[0] ?? "Таблицу не удалось обработать.";
+      setGrantImportState({
+        phase: "error",
+        detail: "Импорт не выполнен.",
+        error: message,
+        fileName: grantImportPreview.fileName,
+        importedCount,
+        processed,
+        total: grantImportPreview.rows.length,
+      });
+      setWarningStatus("Импорт не выполнен", message);
+      return;
+    }
+
+    setGrantImportPreview(null);
+    setGrantImportState({
+      phase: skipped.length > 0 ? "error" : "done",
+        detail:
+          skipped.length > 0
+            ? `Импортировано ${importedCount} ${pluralizeRu(importedCount, "строка", "строки", "строк")}, пропущено ${skipped.length}.`
+            : `Импортировано ${importedCount} ${pluralizeRu(importedCount, "строка", "строки", "строк")} без ошибок.`,
+      error: skipped[0],
+      fileName: grantImportPreview.fileName,
+      importedCount,
+      processed,
+      total: grantImportPreview.rows.length,
+    });
+    setSuccessStatus(
+      "Таблица обработана",
+      skipped.length > 0
+        ? `Импортировано ${importedCount} ${pluralizeRu(importedCount, "строка", "строки", "строк")}, ${skipped.length} пропущено.`
+        : `Импортировано ${importedCount} ${pluralizeRu(importedCount, "строка", "строки", "строк")}.`,
+    );
   }
 
   async function handleAdminOrderStatusUpdate(orderIds: string[], status: OrderStatus) {
     try {
-      const snapshot = await apiRequest<AppSnapshot>("/api/admin/orders/status", {
-        method: "POST",
-        body: JSON.stringify({
-          actorId: viewerUserId,
-          orderIds,
-          status,
-        }),
-      });
-      applySnapshot(snapshot);
+      let latestSnapshot: AppSnapshot | null = null;
+      setOrderBulkState(createBulkActionState("Обновляем заказы", `Готовим перевод в статус «${status}».`, "processing", 0, orderIds.length));
+      for (let index = 0; index < orderIds.length; index += 1) {
+        latestSnapshot = await apiRequest<AppSnapshot>("/api/admin/orders/status", {
+          method: "POST",
+          body: JSON.stringify({
+            actorId: viewerUserId,
+            orderIds: [orderIds[index]],
+            status,
+          }),
+        });
+        setOrderBulkState(
+          createBulkActionState(
+            "Обновляем заказы",
+            `Обработано ${index + 1} из ${formatOrders(orderIds.length)}.`,
+            "processing",
+            index + 1,
+            orderIds.length,
+          ),
+        );
+      }
+      if (latestSnapshot) {
+        applySnapshot(latestSnapshot);
+      }
+      setOrderBulkState(
+        createBulkActionState(
+          "Готово",
+          orderIds.length === 1 ? `Заказ переведён в статус «${status}».` : `Обновлено ${formatOrders(orderIds.length)}.`,
+          "done",
+          orderIds.length,
+          orderIds.length,
+        ),
+      );
       setSuccessStatus(
         "Статус заказов обновлён",
         orderIds.length === 1
           ? `Заказ переведён в статус «${status}».`
-          : `Обновлено ${orderIds.length} заказов · статус «${status}».`,
+          : `Обновлено ${formatOrders(orderIds.length)} · статус «${status}».`,
       );
     } catch (error) {
+      setOrderBulkState(createBulkActionState("Не удалось обновить заказы", "Проверьте данные и попробуйте ещё раз.", "error"));
       const message = error instanceof Error ? error.message : "Не удалось обновить статус заказа.";
       setWarningStatus("Не удалось обновить заказ", message);
+    }
+  }
+
+  async function handleCancelOrder(orderId: string) {
+    try {
+      const snapshot = await apiRequest<AppSnapshot>("/api/order/cancel", {
+        method: "POST",
+        body: JSON.stringify({
+          actorId: viewerUserId,
+          orderId,
+        }),
+      });
+      applySnapshot(snapshot);
+      setSuccessStatus("Заказ отменён", "Мерчики и остаток товара восстановлены.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Не удалось отменить заказ.";
+      setWarningStatus("Не удалось отменить заказ", message);
     }
   }
 
@@ -1731,7 +2075,7 @@ export default function HomePageClient({
         title: "Есть несохранённые изменения",
         detail: "Закрыть редактор без сохранения?",
         confirmLabel: "Закрыть",
-        cancelLabel: "Отмена",
+        cancelLabel: "Продолжить редактирование",
         onConfirm: () => {
           setConfirmDialog(null);
           setCatalogEditorDraft(null);
@@ -1904,17 +2248,46 @@ export default function HomePageClient({
 
     try {
       let latestSnapshot: AppSnapshot | null = null;
-      for (const itemId of itemIds) {
+      setCatalogBulkState(
+        createBulkActionState(
+          isActive ? "Публикуем товары" : "Скрываем товары",
+          "Подготавливаем изменения.",
+          "processing",
+          0,
+          itemIds.length,
+        ),
+      );
+      for (let index = 0; index < itemIds.length; index += 1) {
+        const itemId = itemIds[index];
         latestSnapshot = await apiRequest<AppSnapshot>("/api/catalog/manage", {
           method: "POST",
           body: JSON.stringify({ action: "visibility", actorId: viewerUserId, itemId, isActive }),
         });
+        setCatalogBulkState(
+          createBulkActionState(
+            isActive ? "Публикуем товары" : "Скрываем товары",
+            `Обработано ${index + 1} из ${itemIds.length}.`,
+            "processing",
+            index + 1,
+            itemIds.length,
+          ),
+        );
       }
       if (latestSnapshot) {
         applySnapshot(latestSnapshot);
       }
+      setCatalogBulkState(
+        createBulkActionState(
+          "Готово",
+          isActive ? "Товары опубликованы." : "Товары скрыты.",
+          "done",
+          itemIds.length,
+          itemIds.length,
+        ),
+      );
       setSuccessStatus("Каталог обновлён", isActive ? "Товары опубликованы." : "Товары скрыты.");
     } catch (error) {
+      setCatalogBulkState(createBulkActionState("Не удалось обновить каталог", "Проверьте данные и попробуйте ещё раз.", "error"));
       const message = error instanceof Error ? error.message : "Не удалось обновить каталог.";
       setWarningStatus("Не удалось обновить каталог", message);
     }
@@ -1927,17 +2300,30 @@ export default function HomePageClient({
 
     try {
       let latestSnapshot: AppSnapshot | null = null;
-      for (const itemId of itemIds) {
+      setCatalogBulkState(createBulkActionState("Удаляем товары", "Подготавливаем удаление.", "processing", 0, itemIds.length));
+      for (let index = 0; index < itemIds.length; index += 1) {
+        const itemId = itemIds[index];
         latestSnapshot = await apiRequest<AppSnapshot>("/api/catalog/manage", {
           method: "POST",
           body: JSON.stringify({ action: "delete", actorId: viewerUserId, itemId }),
         });
+        setCatalogBulkState(
+          createBulkActionState(
+            "Удаляем товары",
+            `Удалено ${index + 1} из ${itemIds.length}.`,
+            "processing",
+            index + 1,
+            itemIds.length,
+          ),
+        );
       }
       if (latestSnapshot) {
         applySnapshot(latestSnapshot);
       }
+      setCatalogBulkState(createBulkActionState("Готово", "Выбранные товары удалены.", "done", itemIds.length, itemIds.length));
       setSuccessStatus("Каталог обновлён", "Выбранные товары удалены.");
     } catch (error) {
+      setCatalogBulkState(createBulkActionState("Не удалось удалить товары", "Часть товаров не удалось обработать.", "error"));
       const message = error instanceof Error ? error.message : "Не удалось удалить товары.";
       setWarningStatus("Не удалось удалить товары", message);
     }
@@ -1967,7 +2353,11 @@ export default function HomePageClient({
       setLoginPassword("");
       setSuccessStatus(
         "Вход выполнен",
-        auth.user.role === "ADMIN" ? "Вы вошли как администратор." : "Вы вошли как сотрудник.",
+        auth.user.role === "ADMIN"
+          ? "Вы вошли как администратор."
+          : auth.user.role === "ORDER_MANAGER"
+            ? "Вы вошли как менеджер доставки заказов."
+            : "Вы вошли как сотрудник.",
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Не удалось войти в систему.";
@@ -1989,7 +2379,7 @@ export default function HomePageClient({
     setMode("EMPLOYEE");
   }
 
-  async function changeUserRole(targetUserId: string, role: "ADMIN" | "EMPLOYEE") {
+  async function changeUserRole(targetUserId: string, role: Role) {
     try {
       const snapshot = await apiRequest<AppSnapshot>("/api/admin/role", {
         method: "POST",
@@ -1998,7 +2388,11 @@ export default function HomePageClient({
       applySnapshot(snapshot);
       setSuccessStatus(
         "Права обновлены",
-        role === "ADMIN" ? "Пользователь назначен администратором." : "Права администратора сняты.",
+        role === "ADMIN"
+          ? "Пользователь назначен администратором."
+          : role === "ORDER_MANAGER"
+            ? "Пользователь назначен менеджером доставки заказов."
+            : "Повышенные права сняты.",
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Не удалось изменить права.";
@@ -2081,6 +2475,15 @@ export default function HomePageClient({
                   Пароль: <code>admin123</code>
                 </p>
               </article>
+              <article className="auth-demo-card">
+                <strong>Менеджер доставки заказов</strong>
+                <p>
+                  Логин: <code>orders</code>
+                </p>
+                <p>
+                  Пароль: <code>orders123</code>
+                </p>
+              </article>
             </div>
           </div>
         </section>
@@ -2094,9 +2497,17 @@ export default function HomePageClient({
         <div className="employee-header-wrap">
           <Header
             activeTab={employeeTab}
-            adminHref={canAccessAdmin ? "/?mode=admin&tab=grants" : undefined}
+            adminHref={
+              canAccessFullAdmin
+                ? "/?mode=admin&tab=grants"
+                : canAccessOrdersAdmin
+                  ? "/?mode=admin&tab=orders"
+                  : undefined
+            }
+            adminLabel={canAccessFullAdmin ? "Админ" : "Заказы"}
             availableCoins={employee.coinBalance}
             cartCount={cartItems.reduce((sum, line) => sum + line.quantity, 0)}
+            gratitudeHref={employeeTab === "STORE" ? "/?mode=employee&tab=profile" : undefined}
             onAccountClick={() => setProfileMenuOpen((current) => !current)}
             onCartClick={() => setCartOpen((current) => !current)}
             notificationCount={unreadNotifications}
@@ -2138,16 +2549,13 @@ export default function HomePageClient({
               </div>
               <div className="profile-popover-actions">
                 {canAccessAdmin ? (
-                  <button
+                  <a
                     className="action-button secondary"
-                    onClick={() => {
-                      setMode("ADMIN");
-                      setProfileMenuOpen(false);
-                    }}
-                    type="button"
+                    href={canAccessFullAdmin ? "/?mode=admin&tab=grants" : "/?mode=admin&tab=orders"}
+                    onClick={() => setProfileMenuOpen(false)}
                   >
-                    Админ
-                  </button>
+                    {canAccessFullAdmin ? "Админ" : "Заказы"}
+                  </a>
                 ) : null}
                 <button className="action-button secondary" onClick={handleLogout} type="button">
                   Выйти
@@ -2180,7 +2588,7 @@ export default function HomePageClient({
                           <div className="cart-row-copy">
                             <strong>{line.item.title}</strong>
                             <p>
-                              {line.size} • {line.item.priceCoins} коинов
+                              {line.size} • {formatMerchiki(line.item.priceCoins)}
                             </p>
                           </div>
                           <div className="cart-qty-row">
@@ -2314,11 +2722,11 @@ export default function HomePageClient({
                     <div className="cart-summary-grid">
                       <div>
                         <span>Итого</span>
-                        <strong>{cartView.totalCoins} коинов</strong>
+                        <strong>{formatMerchiki(cartView.totalCoins)}</strong>
                       </div>
                       <div>
                         <span>Баланс</span>
-                        <strong>{employee.coinBalance} коинов</strong>
+                        <strong>{formatMerchiki(employee.coinBalance)}</strong>
                       </div>
                     </div>
 
@@ -2327,7 +2735,7 @@ export default function HomePageClient({
                         {!deliveryValidation.isValid
                           ? deliveryValidation.message
                           : cartView.totalCoins > employee.coinBalance
-                          ? `Не хватает ${cartView.totalCoins - employee.coinBalance} коинов`
+                          ? `Не хватает ${formatMerchiki(cartView.totalCoins - employee.coinBalance)}`
                           : "Проверьте остатки товаров в корзине"}
                       </div>
                     ) : (
@@ -2360,27 +2768,42 @@ export default function HomePageClient({
                 <h1>Корпоративный магазин мерча</h1>
               </div>
               <nav className="employee-header-tabs" aria-label="Навигация администратора">
-                <button
-                  className={adminTab === "GRANTS" ? "employee-tab active" : "employee-tab"}
-                  onClick={() => setAdminTab("GRANTS")}
-                  type="button"
-                >
-                  Начисления
-                </button>
-                <button
-                  className={adminTab === "ORDERS" ? "employee-tab active" : "employee-tab"}
-                  onClick={() => setAdminTab("ORDERS")}
-                  type="button"
-                >
-                  Заказы
-                </button>
-                <button
-                  className={adminTab === "CATALOG" ? "employee-tab active" : "employee-tab"}
-                  onClick={() => setAdminTab("CATALOG")}
-                  type="button"
-                >
-                  Магазин мерча
-                </button>
+                {canAccessFullAdmin ? (
+                  <>
+                    <a
+                      className={adminTab === "GRANTS" ? "employee-tab active" : "employee-tab"}
+                      href="/?mode=admin&tab=grants"
+                    >
+                      Начисления
+                    </a>
+                    <a
+                      className={adminTab === "ORDERS" ? "employee-tab active" : "employee-tab"}
+                      href="/?mode=admin&tab=orders"
+                    >
+                      Заказы
+                    </a>
+                    <a
+                      className={adminTab === "CATALOG" ? "employee-tab active" : "employee-tab"}
+                      href="/?mode=admin&tab=catalog"
+                    >
+                      Магазин мерча
+                    </a>
+                    <a
+                      className={adminTab === "ADMINS" ? "employee-tab active" : "employee-tab"}
+                      href="/?mode=admin&tab=admins"
+                    >
+                      Роли доступа
+                    </a>
+                  </>
+                ) : null}
+                {!canAccessFullAdmin ? (
+                  <a
+                    className={adminTab === "ORDERS" ? "employee-tab active" : "employee-tab"}
+                    href="/?mode=admin&tab=orders"
+                  >
+                    Заказы
+                  </a>
+                ) : null}
               </nav>
             </div>
 
@@ -2396,8 +2819,8 @@ export default function HomePageClient({
               <div className="header-badge coins compact admin-header-badge">
                 <span className="header-badge-icon">{iconSpark()}</span>
                 <div className="header-badge-copy">
-                  <strong>Админ</strong>
-                  <span>управление магазином</span>
+                  <strong>{canAccessFullAdmin ? "Админ" : "Заказы"}</strong>
+                  <span>{canAccessFullAdmin ? "управление магазином" : "управление доставкой"}</span>
                 </div>
               </div>
 
@@ -2446,19 +2869,22 @@ export default function HomePageClient({
             <section className="employee-dashboard section-gap">
               <div className="profile-left">
                 <ProfileCard user={employee} />
-                <RecentPurchases orders={orders} onShowAll={() => setProfileOverlay("orders")} />
+                <RecentPurchases
+                  onCancelOrder={handleCancelOrder}
+                  orders={profileOrders}
+                  onShowAll={() => setProfileOverlay("orders")}
+                />
               </div>
 
               <div className="profile-right">
                 <StatsPanel
                   availableCoins={employee.coinBalance}
-                  gratitudeLimitTotal={MONTHLY_GIFT_LIMIT}
-                  gratitudeLimitUsed={giftCoinsUsed}
                 />
                 <div className="profile-action-row">
                   <SendGratitudePanel
                     amount={giftAmount}
                     colleagues={colleagueOptions}
+                    gratitudeLimitTotal={MONTHLY_GIFT_LIMIT}
                     message={giftMessage}
                     onAmountChange={(value) => setGiftAmount(value.replace(/[^\d]/g, ""))}
                     onMessageChange={setGiftMessage}
@@ -2536,15 +2962,23 @@ export default function HomePageClient({
                 <div className="admin-section-head">
                   <div>
                     <h2>Начисления</h2>
-                    <p>Управление коинами сотрудников и история последних операций.</p>
+                    <p>Управление мерчиками сотрудников и история последних операций.</p>
                   </div>
                 </div>
-                <div className="grid two-up admin-dashboard-grid">
+                <div className="admin-grants-stack">
                   <GrantCoinsPanel
                     coins={grantAmount}
+                    operation={grantOperation}
                     employees={grantRecipients}
+                    importPreview={grantImportPreview}
+                    importState={grantImportState}
+                    onClearImportPreview={clearGrantImportPreview}
                     onClearSelection={() => setSelectedGrantEmployeeIds([])}
                     onCoinsChange={setGrantAmount}
+                    onConfirmImport={confirmGrantImport}
+                    onDownloadTemplate={downloadGrantTemplate}
+                    onImportTable={handleGrantImport}
+                    onOperationChange={setGrantOperation}
                     onReasonChange={setGrantReason}
                     onSelectMany={(employeeIds) =>
                       setSelectedGrantEmployeeIds((current) => Array.from(new Set([...current, ...employeeIds])))
@@ -2554,10 +2988,11 @@ export default function HomePageClient({
                     reason={grantReason}
                     selectedEmployeeIds={selectedGrantEmployeeIds}
                   />
-                  <GrantHistoryList entries={grantHistory} limit={4} onShowAll={() => setGrantHistoryOverlayOpen(true)} />
                 </div>
 
-                <section className="grid two-up section-gap admin-secondary-grid">
+                <div className="grid two-up admin-dashboard-grid">
+                  <GrantHistoryList entries={grantHistory} limit={4} onShowAll={() => setGrantHistoryOverlayOpen(true)} />
+                  
                   <article className="panel">
                     <div className="panel-head panel-head-stack">
                       <div>
@@ -2569,53 +3004,95 @@ export default function HomePageClient({
                     <div className="auto-rewards-grid">
                       <div className="auto-reward-card">
                         <strong>🎂 День рождения</strong>
-                        <p>+50 коинов</p>
+                        <p>+150 мерчиков</p>
                         <span>Раз в год, в день рождения сотрудника, по дате в профиле.</span>
                       </div>
-                    </div>
-                  </article>
-
-                  <article className="panel">
-                    <div className="panel-head panel-head-stack">
-                      <div>
-                        <h2>Аналитика</h2>
-                        <p>Короткая сводка по активности и состоянию системы мерча.</p>
+                      <div className="auto-reward-card">
+                        <strong>⏱ 3 месяца работы</strong>
+                        <p>+650 мерчиков</p>
+                        <span>Начисляется один раз в момент достижения первой вехи.</span>
                       </div>
-                      <span className="badge">Сводка</span>
-                    </div>
-                    <div className="list-stack">
-                      {analytics.map((item) => (
-                        <div className="analytics-row" key={item.label}>
-                          <span>{item.label}</span>
-                          <strong>{item.value}</strong>
-                        </div>
-                      ))}
+                      <div className="auto-reward-card">
+                        <strong>📆 1 год работы</strong>
+                        <p>+1000 мерчиков</p>
+                        <span>Автоматически начисляется один раз при достижении года работы.</span>
+                      </div>
+                      <div className="auto-reward-card">
+                        <strong>📆 2 года работы</strong>
+                        <p>+1200 мерчиков</p>
+                        <span>Автоматически начисляется один раз при достижении двух лет работы.</span>
+                      </div>
+                      <div className="auto-reward-card">
+                        <strong>🏆 3 года работы</strong>
+                        <p>+1500 мерчиков</p>
+                        <span>Автоматически начисляется один раз при достижении трёх лет работы.</span>
+                      </div>
                     </div>
                   </article>
-                </section>
+                </div>
 
-                <section className="panel section-gap">
-                  <div className="panel-head panel-head-stack">
-                    <div>
-                      <h2>Администраторы системы</h2>
-                      <p>Назначайте новых администраторов и управляйте правами доступа.</p>
-                    </div>
-                    <span className="badge">{adminUsers.length} админов</span>
+              </section>
+
+            </>
+          ) : null}
+
+          {adminTab === "CATALOG" ? (
+            <section className="admin-section section-gap">
+              <div className="admin-section-head">
+                <div>
+                  <h2>Редактирование магазина мерча</h2>
+                  <p>Каталог, публикация товаров, остатки и состояние магазина.</p>
+                </div>
+              </div>
+
+              <CatalogTable
+                bulkState={catalogBulkState}
+                onBulkDelete={applyBulkCatalogDelete}
+                onBulkVisibilityChange={applyBulkCatalogVisibility}
+                editingItemId={catalogEditorDraft?.id ?? null}
+                items={filteredAdminCatalog}
+                onAdd={() => openCatalogEditor()}
+                onDelete={deleteCatalogItem}
+                onDuplicate={duplicateCatalogItem}
+                onEdit={openCatalogEditor}
+                onSearchChange={setCatalogSearch}
+                onVisibilityChange={toggleCatalogItem}
+                search={catalogSearch}
+              />
+            </section>
+          ) : null}
+          {adminTab === "ORDERS" ? (
+            <AdminOrdersPanel
+              bulkState={orderBulkState}
+              onCancelOrder={handleCancelOrder}
+              orders={orders}
+              onUpdateStatus={handleAdminOrderStatusUpdate}
+            />
+          ) : null}
+          {adminTab === "ADMINS" ? (
+            <section className="admin-section section-gap">
+              <div className="admin-section-head">
+                <div>
+                  <h2>Роли доступа</h2>
+                  <p>Назначайте администраторов и менеджеров доставки заказов, управляйте правами доступа.</p>
+                </div>
+              </div>
+
+              <section className="panel">
+                <div className="panel-head panel-head-stack">
+                  <div>
+                    <h2>Доступ и роли</h2>
+                    <p>Текущие администраторы и назначение новых пользователей.</p>
                   </div>
+                  <span className="badge">{adminUsers.length + orderManagerUsers.length} ролей доступа</span>
+                </div>
 
-                  <div className="admin-role-toolbar">
-                    <label className="field compact">
-                      <span>Поиск пользователя</span>
-                      <input
-                        placeholder="Поиск по имени, email или логину"
-                        value={adminRoleSearch}
-                        onChange={(event) => setAdminRoleSearch(event.target.value)}
-                      />
-                    </label>
-                  </div>
-
+                <div className="admin-role-layout">
                   <div className="admin-role-current">
-                    <strong>Текущие администраторы</strong>
+                    <div className="admin-role-section-head">
+                      <strong>Текущие роли доступа</strong>
+                      <span>{adminUsers.length + orderManagerUsers.length}</span>
+                    </div>
                     <div className="admin-role-chip-list">
                       {adminUsers.map((user) => {
                         const isSelf = user.id === viewerUserId;
@@ -2638,95 +3115,117 @@ export default function HomePageClient({
                           </div>
                         );
                       })}
+                      {orderManagerUsers.map((user) => (
+                        <div className="admin-role-chip" key={user.id}>
+                          <span className="admin-role-avatar">{initials(user.name)}</span>
+                          <div className="admin-role-chip-copy">
+                            <strong>{user.name}</strong>
+                            <span>{user.email}</span>
+                          </div>
+                          <button
+                            className="link-button"
+                            onClick={() => changeUserRole(user.id, "EMPLOYEE")}
+                            type="button"
+                          >
+                            Снять права
+                          </button>
+                        </div>
+                      ))}
                     </div>
                   </div>
 
-                  {adminRoleSearch.trim() ? (
-                    <div className="admin-role-search-results">
-                      <div className="admin-role-search-head">
-                        <strong>Результаты поиска</strong>
-                        <span>{manageableUsers.length} найдено</span>
-                      </div>
+                  <div className="admin-role-search-block">
+                    <div className="admin-role-toolbar">
+                      <label className="field compact">
+                        <span>Поиск пользователя</span>
+                        <input
+                          placeholder="Поиск по имени, email или логину"
+                          value={adminRoleSearch}
+                          onChange={(event) => setAdminRoleSearch(event.target.value)}
+                        />
+                      </label>
+                    </div>
 
-                      <div className="admin-role-list">
-                        {manageableUsers.map((user) => {
-                          const isSelf = user.id === viewerUserId;
-                          const nextRole = user.role === "ADMIN" ? "EMPLOYEE" : "ADMIN";
+                    {adminRoleSearch.trim() ? (
+                      <div className="admin-role-search-results">
+                        <div className="admin-role-search-head">
+                          <strong>Результаты поиска</strong>
+                          <span>{manageableUsers.length} найдено</span>
+                        </div>
 
-                          return (
-                            <div className="admin-role-row" key={user.id}>
-                              <div className="admin-role-main">
-                                <span className="admin-role-avatar">{initials(user.name)}</span>
-                                <div>
-                                  <strong>{user.name}</strong>
-                                  <p>
-                                    {user.team ?? "Команда не указана"} · {user.email}
-                                  </p>
+                        <div className="admin-role-list">
+                          {manageableUsers.map((user) => {
+                            const isSelf = user.id === viewerUserId;
+                            const isAdmin = user.role === "ADMIN";
+                            const isOrderManager = user.role === "ORDER_MANAGER";
+
+                            return (
+                              <div className="admin-role-row" key={user.id}>
+                                <div className="admin-role-main">
+                                  <span className="admin-role-avatar">{initials(user.name)}</span>
+                                  <div>
+                                    <strong>{user.name}</strong>
+                                    <p>
+                                      {user.team ?? "Команда не указана"} · {user.email}
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="admin-role-side">
+                                  <span className={isAdmin ? "grant-type-badge automatic" : isOrderManager ? "grant-type-badge manual" : "grant-type-badge"}>
+                                    {isAdmin ? "Администратор" : isOrderManager ? "Менеджер заказов" : "Сотрудник"}
+                                  </span>
+                                  <div className="admin-role-actions">
+                                    {!isAdmin ? (
+                                      <button
+                                        className="action-button secondary compact"
+                                        onClick={() => changeUserRole(user.id, "ADMIN")}
+                                        type="button"
+                                      >
+                                        Сделать админом
+                                      </button>
+                                    ) : null}
+                                    {!isOrderManager ? (
+                                      <button
+                                        className="action-button secondary compact"
+                                        onClick={() => changeUserRole(user.id, "ORDER_MANAGER")}
+                                        type="button"
+                                      >
+                                        Менеджер заказов
+                                      </button>
+                                    ) : null}
+                                    {(isAdmin || isOrderManager) ? (
+                                      <button
+                                        className="link-button muted-link"
+                                        disabled={isSelf && isAdmin}
+                                        onClick={() => changeUserRole(user.id, "EMPLOYEE")}
+                                        type="button"
+                                      >
+                                        {isSelf && isAdmin ? "Текущий админ" : "Снять права"}
+                                      </button>
+                                    ) : null}
+                                  </div>
                                 </div>
                               </div>
-                              <div className="admin-role-side">
-                                <span className={user.role === "ADMIN" ? "grant-type-badge automatic" : "grant-type-badge manual"}>
-                                  {user.role === "ADMIN" ? "Администратор" : "Сотрудник"}
-                                </span>
-                                <button
-                                  className="action-button secondary compact"
-                                  disabled={isSelf && nextRole === "EMPLOYEE"}
-                                  onClick={() => changeUserRole(user.id, nextRole)}
-                                  type="button"
-                                >
-                                  {user.role === "ADMIN" ? (isSelf ? "Текущий админ" : "Снять права") : "Назначить админом"}
-                                </button>
-                              </div>
+                            );
+                          })}
+
+                          {manageableUsers.length === 0 ? (
+                            <div className="admin-role-empty">
+                              <strong>Ничего не найдено</strong>
+                              <span>Попробуйте изменить запрос</span>
                             </div>
-                          );
-                        })}
-
-                        {manageableUsers.length === 0 ? (
-                          <div className="admin-role-empty">
-                            <strong>Ничего не найдено</strong>
-                            <span>Попробуйте изменить запрос</span>
-                          </div>
-                        ) : null}
+                          ) : null}
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="admin-role-hint">
-                      <strong>Поиск сотрудника</strong>
-                      <span>Введите имя или email, чтобы назначить нового администратора.</span>
-                    </div>
-                  )}
-                </section>
-              </section>
-
-            </>
-          ) : null}
-
-          {adminTab === "CATALOG" ? (
-            <section className="admin-section section-gap">
-              <div className="admin-section-head">
-                <div>
-                  <h2>Редактирование магазина мерча</h2>
-                  <p>Каталог, публикация товаров, остатки и состояние магазина.</p>
+                    ) : (
+                      <div className="admin-role-inline-hint">
+                        Начните вводить имя, email или логин, чтобы назначить администратора или менеджера заказов.
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-
-              <CatalogTable
-                onBulkDelete={applyBulkCatalogDelete}
-                onBulkVisibilityChange={applyBulkCatalogVisibility}
-                editingItemId={catalogEditorDraft?.id ?? null}
-                items={filteredAdminCatalog}
-                onAdd={() => openCatalogEditor()}
-                onDelete={deleteCatalogItem}
-                onDuplicate={duplicateCatalogItem}
-                onEdit={openCatalogEditor}
-                onSearchChange={setCatalogSearch}
-                onVisibilityChange={toggleCatalogItem}
-                search={catalogSearch}
-              />
+              </section>
             </section>
-          ) : null}
-          {adminTab === "ORDERS" ? (
-            <AdminOrdersPanel orders={orders} onUpdateStatus={handleAdminOrderStatusUpdate} />
           ) : null}
         </>
       )}
@@ -2750,77 +3249,91 @@ export default function HomePageClient({
           <span>🪙</span>
         </div>
       ) : null}
-      {profileOverlay ? (
-        <div className="info-modal-backdrop" onClick={() => setProfileOverlay(null)} role="presentation">
-          <div
-            aria-modal="true"
-            className="info-modal"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-          >
-            <div className="panel-head">
-              <h2>
-                {profileOverlay === "orders" ? "Все заказы" : "Все благодарности"}
-              </h2>
-              <button className="link-button" onClick={() => setProfileOverlay(null)} type="button">
-                Закрыть
-              </button>
-            </div>
-
-            <div className="info-modal-body">
-              {profileOverlay === "orders" ? (
-                <div className="list-stack">
-                  {orders.map((order) => (
-                    <div className="order-card" key={order.id}>
-                      <strong>{order.itemTitle}</strong>
-                      <p>
-                        Получение: {order.delivery}
-                        <br />
-                        Дата: {order.date}
-                      </p>
-                      <div className="order-progress">
-                        {orderSteps.map((step) => (
-                          <span
-                            className={orderSteps.indexOf(step) <= orderSteps.indexOf(order.status) ? "step active" : "step"}
-                            key={step}
-                          >
-                            ● {step}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
+      {profileOverlay && typeof document !== "undefined"
+        ? createPortal(
+            <div className="info-modal-backdrop" onClick={() => setProfileOverlay(null)} role="presentation">
+              <div
+                aria-modal="true"
+                className="info-modal"
+                onClick={(event) => event.stopPropagation()}
+                role="dialog"
+              >
+                <div className="panel-head">
+                  <h2>
+                    {profileOverlay === "orders" ? "Все заказы" : "Все благодарности"}
+                  </h2>
+                  <button className="link-button" onClick={() => setProfileOverlay(null)} type="button">
+                    Закрыть
+                  </button>
                 </div>
-              ) : (
-                <div className="feed-v2-list modal-feed-list">
-                  {gratitudeFeed.map((event) => {
-                    const receiver = users.find((user) => user.name === event.to);
-                    const sender = users.find((user) => user.name === event.from);
-                    const title =
-                      receiver?.name === employee.name
-                        ? `${event.from} → вам`
-                        : sender?.name === employee.name
-                          ? `Вы → ${event.to}`
-                          : `${event.from} → ${event.to}`;
 
-                    return (
-                      <div className="feed-v2-row" key={event.id}>
-                        <span className="feed-v2-avatar">{initials(event.from)}</span>
-                        <div className="feed-v2-copy">
-                          <strong>{title}</strong>
-                          <p>{event.message}</p>
-                          <span>{event.date}</span>
+                <div className="info-modal-body">
+                  {profileOverlay === "orders" ? (
+                    <div className="list-stack">
+                      {profileOrders.map((order) => (
+                        <div className="order-card" key={order.id}>
+                          <strong>{order.itemTitle}</strong>
+                          <p>
+                            Получение: {order.delivery}
+                            <br />
+                            Дата: {order.date}
+                          </p>
+                          {order.status === "Отменён" ? (
+                            <div className="order-progress">
+                              <span className="step cancelled">● Отменён</span>
+                            </div>
+                          ) : (
+                            <div className="order-progress">
+                              {orderSteps.map((step) => (
+                                <span
+                                  className={orderSteps.indexOf(step) <= orderSteps.indexOf(order.status) ? "step active" : "step"}
+                                  key={step}
+                                >
+                                  ● {step}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {order.status === "Создан" ? (
+                            <button className="link-button muted-link" onClick={() => handleCancelOrder(order.id)} type="button">
+                              Отменить заказ
+                            </button>
+                          ) : null}
                         </div>
-                        <div className="feed-v2-coins">+{event.amount} коинов</div>
-                      </div>
-                    );
-                  })}
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="feed-v2-list modal-feed-list">
+                      {allProfileGratitudeEvents.map((event) => {
+                        const receiver = users.find((user) => user.name === event.to);
+                        const sender = users.find((user) => user.name === event.from);
+                        const title =
+                          receiver?.name === employee.name
+                            ? `${event.from} → вам`
+                            : sender?.name === employee.name
+                              ? `Вы → ${event.to}`
+                              : `${event.from} → ${event.to}`;
+
+                        return (
+                          <div className="feed-v2-row" key={event.id}>
+                            <span className="feed-v2-avatar">{initials(event.from)}</span>
+                            <div className="feed-v2-copy">
+                              <strong>{title}</strong>
+                              <p>{event.message}</p>
+                              <span>{event.date}</span>
+                            </div>
+                            <div className="feed-v2-coins">+{event.amount} мерчиков</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
       {grantHistoryOverlayOpen && typeof document !== "undefined"
         ? createPortal(
             <div className="info-modal-backdrop" onClick={() => setGrantHistoryOverlayOpen(false)} role="presentation">

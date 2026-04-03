@@ -3,15 +3,17 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { GratitudePost, OrderCard } from "@/lib/app-types";
-import type { User } from "@/lib/domain/types";
+import type { Role, User } from "@/lib/domain/types";
 
 type EmployeeTab = "PROFILE" | "STORE" | "HISTORY";
 
 type HeaderProps = {
   activeTab: EmployeeTab;
   adminHref?: string;
+  adminLabel?: string;
   availableCoins: number;
   cartCount?: number;
+  gratitudeHref?: string;
   notificationCount: number;
   onAccountClick: () => void;
   onCartClick?: () => void;
@@ -25,8 +27,6 @@ type ProfileCardProps = {
 
 type StatsPanelProps = {
   availableCoins: number;
-  gratitudeLimitUsed: number;
-  gratitudeLimitTotal: number;
 };
 
 type SendGratitudePanelProps = {
@@ -39,6 +39,7 @@ type SendGratitudePanelProps = {
   onMessageChange: (value: string) => void;
   onSubmit: () => void;
   remainingLimit: number;
+  gratitudeLimitTotal: number;
 };
 
 type GratitudeFeedProps = {
@@ -50,8 +51,19 @@ type GratitudeFeedProps = {
 
 type RecentPurchasesProps = {
   orders: OrderCard[];
+  onCancelOrder?: (orderId: string) => void;
   onShowAll: () => void;
 };
+
+function roleLabel(role: Role) {
+  if (role === "ADMIN") {
+    return "Администратор";
+  }
+  if (role === "ORDER_MANAGER") {
+    return "Менеджер доставки заказов";
+  }
+  return "Сотрудник";
+}
 
 function initials(name: string) {
   return name
@@ -112,15 +124,6 @@ function mailIcon() {
   );
 }
 
-function pinIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24">
-      <path d="M12 21s6-5.5 6-11a6 6 0 1 0-12 0c0 5.5 6 11 6 11z" />
-      <circle cx="12" cy="10" r="2.5" />
-    </svg>
-  );
-}
-
 function clockIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -144,8 +147,10 @@ function teamIcon() {
 export function Header({
   activeTab,
   adminHref,
+  adminLabel = "Админ",
   availableCoins,
   cartCount = 0,
+  gratitudeHref,
   notificationCount,
   onAccountClick,
   onCartClick,
@@ -160,8 +165,8 @@ export function Header({
         </div>
         <nav className="employee-header-tabs" aria-label="Навигация сотрудника">
           {[
-            { id: "PROFILE" as const, href: "/?mode=employee&tab=profile", label: "Профиль" },
             { id: "STORE" as const, href: "/?mode=employee&tab=store", label: "Магазин" },
+            { id: "PROFILE" as const, href: "/?mode=employee&tab=profile", label: "Профиль" },
             { id: "HISTORY" as const, href: "/?mode=employee&tab=history", label: "История" },
           ].map((tab) => (
             <a
@@ -178,32 +183,67 @@ export function Header({
       <div className="employee-header-side">
         {adminHref ? (
           <a className="header-mode-toggle" href={adminHref}>
-            Админ
+            {adminLabel}
           </a>
         ) : null}
 
-        <div className="header-badge coins compact">
-          <span className="header-badge-icon">{coinIcon()}</span>
-          <div className="header-badge-copy">
-            <strong>{availableCoins}</strong>
-            <span>Баланс</span>
+        {activeTab === "STORE" ? (
+          <div className="header-badge coins compact">
+            <span className="header-badge-icon">{coinIcon()}</span>
+            <div className="header-badge-copy">
+              <strong>{availableCoins}</strong>
+              <span>Баланс</span>
+            </div>
           </div>
-        </div>
+        ) : null}
 
-        <button className="header-cart" onClick={onCartClick} type="button">
-          <span className="header-cart-icon">{bagIcon()}</span>
-          <span className="header-cart-count">{cartCount}</span>
-        </button>
+        {gratitudeHref ? (
+          <a
+            className="header-notifications gratitude-shortcut"
+            href={gratitudeHref}
+            aria-label="Открыть благодарности"
+            title="Быстрый переход к благодарностям"
+          >
+            <span className="header-notifications-icon">{giftIcon()}</span>
+          </a>
+        ) : null}
 
-        <button className="header-account" onClick={onAccountClick} type="button">
+        {activeTab === "STORE" ? (
+          <>
+            <button
+              aria-label="Открыть корзину"
+              className="header-cart"
+              onClick={onCartClick}
+              title="Корзина"
+              type="button"
+            >
+              <span className="header-cart-icon">{bagIcon()}</span>
+              <span className="header-cart-count">{cartCount}</span>
+            </button>
+          </>
+        ) : null}
+
+        <button
+          aria-label="Открыть профиль"
+          className="header-account"
+          onClick={onAccountClick}
+          title="Профиль"
+          type="button"
+        >
           <span className="header-account-avatar">{initials(user.name)}</span>
           <div className="header-account-copy">
             <strong>{user.name}</strong>
-            <span>{user.jobTitle ?? (user.role === "ADMIN" ? "Администратор" : "Сотрудник")}</span>
+            <span>{user.jobTitle ?? roleLabel(user.role)}</span>
           </div>
         </button>
 
-        <button className="header-notifications" onClick={onNotificationsClick} type="button">
+        <button
+          aria-label="Открыть уведомления"
+          className="header-notifications"
+          onClick={onNotificationsClick}
+          title="Уведомления"
+          type="button"
+        >
           <span className="header-notifications-icon">{bellIcon()}</span>
           <span>{notificationCount}</span>
         </button>
@@ -219,7 +259,7 @@ export function ProfileCard({ user }: ProfileCardProps) {
         <span className="profile-card-v2-avatar">{initials(user.name)}</span>
         <div>
           <strong>{user.name}</strong>
-          <p>{user.jobTitle ?? (user.role === "ADMIN" ? "Администратор" : "Сотрудник")}</p>
+          <p>{user.jobTitle ?? roleLabel(user.role)}</p>
         </div>
       </div>
 
@@ -240,13 +280,6 @@ export function ProfileCard({ user }: ProfileCardProps) {
         </div>
         <div>
           <span className="profile-meta-inline">
-            <i>{pinIcon()}</i>
-            Локация
-          </span>
-          <strong>{user.location ?? "Не указана"}</strong>
-        </div>
-        <div>
-          <span className="profile-meta-inline">
             <i>{clockIcon()}</i>
             Стаж
           </span>
@@ -259,12 +292,7 @@ export function ProfileCard({ user }: ProfileCardProps) {
 
 export function StatsPanel({
   availableCoins,
-  gratitudeLimitUsed,
-  gratitudeLimitTotal,
 }: StatsPanelProps) {
-  const remainingGiftCoins = gratitudeLimitTotal - gratitudeLimitUsed;
-  const progress = Math.min((gratitudeLimitUsed / gratitudeLimitTotal) * 100, 100);
-
   return (
     <article className="dashboard-card stats-panel-v2">
       <div className="stats-panel-v2-grid">
@@ -273,23 +301,8 @@ export function StatsPanel({
             <i>{coinIcon()}</i>
             <strong>{availableCoins}</strong>
           </div>
-          <span>Доступно</span>
-        </div>
-
-        <div
-          className="stats-panel-v2-item gift"
-          data-tooltip={`Это отдельный ежемесячный лимит ${gratitudeLimitTotal} коинов для благодарностей. Неиспользованный остаток сгорает в конце месяца и заново начисляется 1 числа.`}
-        >
-          <div className="stats-panel-v2-value">
-            <i>{giftIcon()}</i>
-            <strong>
-              {remainingGiftCoins} / {gratitudeLimitTotal}
-            </strong>
-          </div>
-          <span>Можно подарить</span>
-          <div className="stats-panel-v2-progress">
-            <div className="stats-panel-v2-progress-fill" style={{ width: `${progress}%` }} />
-          </div>
+          <span>Мой баланс мерчиков</span>
+          <small>Можно потратить на товары в Магазине</small>
         </div>
       </div>
     </article>
@@ -306,6 +319,7 @@ export function SendGratitudePanel({
   onMessageChange,
   onSubmit,
   remainingLimit,
+  gratitudeLimitTotal,
 }: SendGratitudePanelProps) {
   const selectedColleague = colleagues.find((colleague) => colleague.id === selectedRecipientId) ?? null;
   const [searchValue, setSearchValue] = useState(selectedColleague?.name ?? "");
@@ -348,8 +362,14 @@ export function SendGratitudePanel({
       <div className="dashboard-card-head">
         <div>
           <h2>Отправить благодарность</h2>
-          <p>Осталось {remainingLimit} коинов.</p>
         </div>
+      </div>
+
+      <div className="gratitude-budget-badge">
+        <strong>
+          {remainingLimit} из {gratitudeLimitTotal}
+        </strong>
+        <span>Не влияет на Мой баланс мерчиков</span>
       </div>
 
       <div className="gratitude-panel-v2-controls">
@@ -435,10 +455,11 @@ export function SendGratitudePanel({
         </label>
 
         <label className="compact-field">
-          <span>Коины</span>
+          <span>Сколько отправить</span>
           <input
             inputMode="numeric"
             pattern="[0-9]*"
+            placeholder="Например: 5"
             type="text"
             value={amount}
             onChange={(event) => onAmountChange(event.target.value)}
@@ -500,7 +521,7 @@ export function GratitudeFeed({
                 <p>{event.message}</p>
                 <span>{event.date}</span>
               </div>
-              <div className="feed-v2-coins">+{event.amount} коинов</div>
+              <div className="feed-v2-coins">+{event.amount} мерчиков</div>
             </div>
           );
         })}
@@ -509,7 +530,7 @@ export function GratitudeFeed({
   );
 }
 
-export function RecentPurchases({ orders, onShowAll }: RecentPurchasesProps) {
+export function RecentPurchases({ orders, onCancelOrder, onShowAll }: RecentPurchasesProps) {
   const recentOrders = orders.slice(0, 3);
 
   return (
@@ -531,6 +552,11 @@ export function RecentPurchases({ orders, onShowAll }: RecentPurchasesProps) {
                 {order.date} • {order.status.toLowerCase()}
               </span>
             </div>
+            {order.status === "Создан" && onCancelOrder ? (
+              <button className="link-button muted-link" onClick={() => onCancelOrder(order.id)} type="button">
+                Отменить
+              </button>
+            ) : null}
           </div>
         ))}
       </div>

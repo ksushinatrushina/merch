@@ -1,5 +1,5 @@
 import type { AppSnapshot, PersistedAppState } from "@/lib/app-types";
-import { adminUser, currentUser, giftQuota, colleagues, merchItems } from "@/lib/mock-data";
+import { adminUser, currentUser, giftQuota, colleagues, merchItems, orderManagerUser } from "@/lib/mock-data";
 
 export const initialHistory = [
   {
@@ -88,12 +88,13 @@ export const initialFeed = [
     reason: "За помощь с релизом",
     message: "За помощь с подготовкой демо для клиента.",
     date: "12 марта 2026",
-    reactions: { thanks: 8, celebrate: 2, support: 3, fire: 1 },
+    reactions: { thanks: 8, celebrate: 2, support: 3, fire: 1, sparkle: 0 },
     reactionUsers: {
       thanks: ["u-1"],
       celebrate: [],
       support: [],
       fire: [],
+      sparkle: [],
     },
   },
   {
@@ -108,12 +109,13 @@ export const initialFeed = [
     reason: "За поддержку команды",
     message: "Быстро подключился и спас синк с командой.",
     date: "11 марта 2026",
-    reactions: { thanks: 4, celebrate: 1, support: 5, fire: 2 },
+    reactions: { thanks: 4, celebrate: 1, support: 5, fire: 2, sparkle: 0 },
     reactionUsers: {
       thanks: [],
       celebrate: [],
       support: ["u-1"],
       fire: [],
+      sparkle: [],
     },
   },
 ] as const;
@@ -124,9 +126,13 @@ export const initialActivity = [
 ] as const;
 
 export function createInitialPersistedState(): PersistedAppState {
+  const users = [currentUser, ...colleagues, adminUser, orderManagerUser];
+
   return {
-    users: [currentUser, ...colleagues, adminUser],
+    users,
+    quotas: { [currentUser.id]: { ...giftQuota } },
     quota: { ...giftQuota },
+    automationStartedAt: new Date().toISOString(),
     catalog: merchItems.map((item) => ({
       ...item,
       sizes: item.sizes?.map((entry) => ({ ...entry })),
@@ -134,6 +140,7 @@ export function createInitialPersistedState(): PersistedAppState {
     history: initialHistory.map((entry) => ({ ...entry })),
     grantHistory: initialGrantHistory.map((entry) => ({ ...entry })),
     birthdayGrants: [],
+    automatedGrantKeys: [],
     notifications: initialNotifications.map((entry) => ({ ...entry })),
     orders: initialOrders.map((entry) => ({ ...entry })),
     gratitudeFeed: initialFeed.map((entry) => ({

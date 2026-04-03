@@ -37,6 +37,34 @@ const locations = [
 ] as const;
 
 const tenures = ["6 месяцев", "1 год", "1.5 года", "2 года", "3 года", "4 года"] as const;
+const referenceEmploymentDate = new Date("2026-04-01T00:00:00.000Z");
+
+function shiftDate(base: Date, months: number) {
+  const next = new Date(base);
+  next.setUTCMonth(next.getUTCMonth() + months);
+  return next;
+}
+
+function formatIsoDate(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function employmentStartDateFromTenure(tenure: (typeof tenures)[number]) {
+  switch (tenure) {
+    case "6 месяцев":
+      return formatIsoDate(shiftDate(referenceEmploymentDate, -6));
+    case "1 год":
+      return formatIsoDate(shiftDate(referenceEmploymentDate, -12));
+    case "1.5 года":
+      return formatIsoDate(shiftDate(referenceEmploymentDate, -18));
+    case "2 года":
+      return formatIsoDate(shiftDate(referenceEmploymentDate, -24));
+    case "3 года":
+      return formatIsoDate(shiftDate(referenceEmploymentDate, -36));
+    case "4 года":
+      return formatIsoDate(shiftDate(referenceEmploymentDate, -48));
+  }
+}
 
 const generatedNames = [
   "Алексей Морозов",
@@ -184,20 +212,25 @@ function translitName(name: string) {
 }
 
 function buildGeneratedColleagues(): User[] {
-  return generatedNames.map((name, index) => ({
-    id: `u-g-${index + 1}`,
-    name,
-    email: `${translitName(name)}@company.test`,
-    username: `user${index + 1}`,
-    password: "demo123",
-    role: "EMPLOYEE",
-    coinBalance: 35 + ((index * 17) % 145),
-    birthday: `${String((index % 12) + 1).padStart(2, "0")}-${String((index % 28) + 1).padStart(2, "0")}`,
-    jobTitle: jobTitles[index % jobTitles.length],
-    team: teams[index % teams.length],
-    location: locations[index % locations.length],
-    tenure: tenures[index % tenures.length],
-  }));
+  return generatedNames.map((name, index) => {
+    const tenure = tenures[index % tenures.length];
+
+    return {
+      id: `u-g-${index + 1}`,
+      name,
+      email: `${translitName(name)}@company.test`,
+      username: `user${index + 1}`,
+      password: "demo123",
+      role: "EMPLOYEE",
+      coinBalance: 35 + ((index * 17) % 145),
+      birthday: `${String((index % 12) + 1).padStart(2, "0")}-${String((index % 28) + 1).padStart(2, "0")}`,
+      employmentStartDate: employmentStartDateFromTenure(tenure),
+      jobTitle: jobTitles[index % jobTitles.length],
+      team: teams[index % teams.length],
+      location: locations[index % locations.length],
+      tenure,
+    };
+  });
 }
 
 export const currentUser: User = {
@@ -209,6 +242,7 @@ export const currentUser: User = {
   role: "EMPLOYEE",
   coinBalance: 140,
   birthday: "03-12",
+  employmentStartDate: "2024-04-01",
   jobTitle: "Product Manager",
   team: "Product",
   location: "Luxembourg office",
@@ -224,10 +258,27 @@ export const adminUser: User = {
   role: "ADMIN",
   coinBalance: 0,
   birthday: "07-19",
+  employmentStartDate: "2022-04-01",
   jobTitle: "People Ops Admin",
   team: "People Ops",
   location: "HQ",
   tenure: "4 года",
+};
+
+export const orderManagerUser: User = {
+  id: "u-order-manager",
+  name: "Олег Логистик",
+  email: "delivery@company.test",
+  username: "orders",
+  password: "orders123",
+  role: "ORDER_MANAGER",
+  coinBalance: 0,
+  birthday: "02-11",
+  employmentStartDate: "2025-01-10",
+  jobTitle: "Менеджер доставки заказов",
+  team: "Operations",
+  location: "HQ",
+  tenure: "1 год",
 };
 
 const baseColleagues: User[] = [
@@ -240,6 +291,7 @@ const baseColleagues: User[] = [
     role: "EMPLOYEE",
     coinBalance: 85,
     birthday: "05-04",
+    employmentStartDate: "2025-04-01",
     jobTitle: "Frontend Engineer",
     team: "Engineering",
     location: "Remote",
@@ -254,6 +306,7 @@ const baseColleagues: User[] = [
     role: "EMPLOYEE",
     coinBalance: 120,
     birthday: "09-17",
+    employmentStartDate: "2023-04-01",
     jobTitle: "HR Partner",
     team: "People",
     location: "Warsaw office",
@@ -268,6 +321,7 @@ const baseColleagues: User[] = [
     role: "EMPLOYEE",
     coinBalance: 60,
     birthday: "11-22",
+    employmentStartDate: "2024-10-01",
     jobTitle: "Sales Lead",
     team: "Sales",
     location: "Berlin office",

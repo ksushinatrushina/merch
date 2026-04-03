@@ -7,18 +7,39 @@ import { createPortal } from "react-dom";
 import type { GrantHistoryEntry, OrderCard, OrderStatus } from "@/lib/app-types";
 import type { MerchItem, User } from "@/lib/domain/types";
 import { EmployeePicker } from "@/components/employee-picker";
+import { formatEmployees, formatMerchiki, formatOrders, pluralizeRu } from "@/lib/russian";
 
 type CatalogEditorDraft = MerchItem;
 
 type GrantCoinsPanelProps = {
+  operation: "grant" | "deduct";
   employees: User[];
   selectedEmployeeIds: string[];
   coins: number;
   reason: string;
+  importPreview: {
+    fileName: string;
+    rows: Array<{ amount: number; reason: string; recipient: string }>;
+    sample: Array<{ amount: number; reason: string; recipient: string }>;
+  } | null;
+  importState: {
+    detail: string;
+    error?: string;
+    fileName?: string;
+    importedCount?: number;
+    phase: "idle" | "processing" | "done" | "error";
+    processed?: number;
+    total?: number;
+  };
   onClearSelection: () => void;
+  onOperationChange: (value: "grant" | "deduct") => void;
   onSelectMany: (employeeIds: string[]) => void;
   onToggleEmployee: (employeeId: string) => void;
   onCoinsChange: (value: number) => void;
+  onImportTable: (file: File | null) => void;
+  onClearImportPreview: () => void;
+  onConfirmImport: () => void;
+  onDownloadTemplate: () => void;
   onReasonChange: (value: string) => void;
   onSubmit: () => void;
 };
@@ -43,6 +64,13 @@ type GroupedGrantHistoryEntry = {
 type CatalogTableProps = {
   items: MerchItem[];
   editingItemId?: string | null;
+  bulkState?: {
+    detail: string;
+    phase: "idle" | "processing" | "done" | "error";
+    processed?: number;
+    title: string;
+    total?: number;
+  } | null;
   search: string;
   onSearchChange: (value: string) => void;
   onAdd: () => void;
@@ -55,7 +83,15 @@ type CatalogTableProps = {
 };
 
 type AdminOrdersPanelProps = {
+  bulkState?: {
+    detail: string;
+    phase: "idle" | "processing" | "done" | "error";
+    processed?: number;
+    title: string;
+    total?: number;
+  } | null;
   orders: OrderCard[];
+  onCancelOrder: (orderId: string) => void;
   onUpdateStatus: (orderIds: string[], status: OrderStatus) => void;
 };
 
@@ -97,7 +133,7 @@ type CatalogSortKey = "title" | "priceCoins" | "popularity" | "status";
 const catalogFilters: CatalogFilter[] = ["Все", "Активные", "Скрытые", "Нет в наличии", "Заканчивается"];
 const lowStockThreshold = 5;
 const baseCatalogCategories = ["Одежда", "Посуда", "Канцелярия"];
-const adminOrderStatusFilters: Array<"Все" | OrderStatus> = ["Все", "Создан", "Подтверждён", "Отправлен", "Доставлен"];
+const adminOrderStatusFilters: Array<"Все" | OrderStatus> = ["Все", "Создан", "Подтверждён", "Отправлен", "Доставлен", "Отменён"];
 const adminOrderDeliveryFilters = ["Все способы", "Самовывоз", "Доставка"] as const;
 const adminOrderSortModes = [
   { value: "date-desc", label: "Сначала новые" },
@@ -107,6 +143,7 @@ const adminOrderSortModes = [
   { value: "delivery", label: "По получению" },
 ] as const;
 type AdminOrderSortMode = (typeof adminOrderSortModes)[number]["value"];
+const APP_TIMEZONE = "Europe/Luxembourg";
 
 function getNextOrderStatus(status: OrderStatus): OrderStatus | null {
   if (status === "Создан") {
@@ -134,6 +171,22 @@ function getNextOrderStatusLabel(status: OrderStatus) {
   return null;
 }
 
+function getOrderActionHint(status: OrderStatus) {
+  if (status === "Создан") {
+    return "Нужно подтвердить";
+  }
+  if (status === "Подтверждён") {
+    return "Нужно отправить";
+  }
+  if (status === "Отправлен") {
+    return "Нужно завершить";
+  }
+  if (status === "Отменён") {
+    return "Заказ отменён";
+  }
+  return "Готово";
+}
+
 function previousOrderStatus(status: OrderStatus): OrderStatus | null {
   if (status === "Подтверждён") {
     return "Создан";
@@ -157,7 +210,10 @@ function orderStatusRank(status: OrderStatus) {
   if (status === "Отправлен") {
     return 2;
   }
-  return 3;
+  if (status === "Доставлен") {
+    return 3;
+  }
+  return 4;
 }
 
 function statusClassName(status: "Все" | OrderStatus) {
@@ -172,6 +228,9 @@ function statusClassName(status: "Все" | OrderStatus) {
   }
   if (status === "Доставлен") {
     return "delivered";
+  }
+  if (status === "Отменён") {
+    return "cancelled";
   }
   return "all";
 }
@@ -201,73 +260,113 @@ export function GrantCoinsPanel(props: GrantCoinsPanelProps) {
   const hasSelection = selectedEmployees.length > 0;
   const hasValidAmount = Number.isInteger(props.coins) && props.coins > 0;
   const canSubmit = hasSelection && hasValidAmount;
+  const isDeduction = props.operation === "deduct";
+  const operationVerb = isDeduction ? "Списать" : "Начислить";
+  const operationNoun = isDeduction ? "Списание" : "Начисление";
   const validationMessage = !hasSelection
-    ? "Выберите хотя бы одного сотрудника"
+    ? "Выберите хотя бы одного получателя"
     : !hasValidAmount
-      ? "Укажите количество коинов"
+      ? "Укажите количество мерчиков"
       : null;
   const showSafeThresholdWarning = props.coins >= 100 || totalCoins >= 500;
   const submitLabel = canSubmit
     ? selectedEmployees.length === 1
-      ? `Начислить ${props.coins} коинов`
-      : `Начислить ${totalCoins} коинов`
-    : "Начислить коины";
+      ? `${operationVerb} ${formatMerchiki(props.coins)}`
+      : `${operationVerb} ${formatMerchiki(totalCoins)}`
+    : `${operationVerb} мерчики`;
+  const importProgress =
+    props.importState.total && props.importState.total > 0
+      ? Math.round(((props.importState.processed ?? 0) / props.importState.total) * 100)
+      : 0;
 
   return (
-    <article className="panel admin-panel-block">
+    <article className="panel admin-panel-block admin-grant-panel">
       <div className="panel-head panel-head-stack">
         <div>
-          <h2>Начислить коины</h2>
-          <p>Выбери сотрудников, укажи сумму и при необходимости добавь причину.</p>
+          <h2>Операция с мерчиками</h2>
+          <p>Выбери получателей, задай тип операции, сумму и при необходимости добавь причину.</p>
         </div>
       </div>
 
       <div className="admin-grant-layout">
-        <EmployeePicker
-          employees={props.employees}
-          onClearSelection={props.onClearSelection}
-          onSelectMany={props.onSelectMany}
-          onToggleEmployee={props.onToggleEmployee}
-          searchEndpoint="/api/employees/search"
-          selectedEmployeeIds={props.selectedEmployeeIds}
-        />
+        <div className="admin-grant-people">
+          <EmployeePicker
+            employees={props.employees}
+            label="Получатели"
+            onClearSelection={props.onClearSelection}
+            onSelectMany={props.onSelectMany}
+            onToggleEmployee={props.onToggleEmployee}
+            searchEndpoint="/api/employees/search"
+            selectedEmployeeIds={props.selectedEmployeeIds}
+          />
+        </div>
 
-        <div className="admin-grant-form">
+        <div className="admin-grant-primary">
+          <div className="admin-grant-column-label">Тип операции</div>
+          <div className="grant-operation-switch" role="tablist" aria-label="Тип операции с мерчиками">
+            <button
+              aria-selected={props.operation === "grant"}
+              className={props.operation === "grant" ? "mode-button active" : "mode-button"}
+              onClick={() => props.onOperationChange("grant")}
+              type="button"
+            >
+              Начислить
+            </button>
+            <button
+              aria-selected={props.operation === "deduct"}
+              className={props.operation === "deduct" ? "mode-button active danger" : "mode-button danger"}
+              onClick={() => props.onOperationChange("deduct")}
+              type="button"
+            >
+              Списать
+            </button>
+          </div>
+
+          <div className="grant-operation-note">
+            {isDeduction
+              ? "Списание уменьшает баланс выбранных получателей."
+              : "Начисление увеличивает баланс выбранных получателей."}
+          </div>
+
           <label className="field">
-            <span>Количество коинов</span>
+            <span>Количество мерчиков</span>
             <input
               min={1}
-              type="number"
-              value={props.coins}
-              onChange={(event) => props.onCoinsChange(Number(event.target.value))}
+              inputMode="numeric"
+              pattern="[0-9]*"
+              type="text"
+              value={props.coins === 0 ? "" : String(props.coins)}
+              onChange={(event) => props.onCoinsChange(Number((event.target.value || "0").replace(/^0+(?=\d)/, "")))}
             />
           </label>
 
           <label className="field">
-            <span>Причина начисления</span>
+            <span>{isDeduction ? "Причина списания" : "Причина начисления"}</span>
             <input
-              placeholder="Например: Бонус за релиз"
+              placeholder={isDeduction ? "Например: Корректировка баланса" : "Например: Бонус за релиз"}
               value={props.reason}
               onChange={(event) => props.onReasonChange(event.target.value)}
             />
           </label>
 
           <div className="grant-summary">
-            <strong>Начисление</strong>
+            <strong>{operationNoun}</strong>
             {canSubmit ? (
               <p>
-                {props.coins} × {selectedEmployees.length} = {totalCoins} коинов
+                {props.coins} × {selectedEmployees.length} = {formatMerchiki(totalCoins)}
               </p>
             ) : (
               <p>{validationMessage}</p>
             )}
             {selectedEmployees.length > 0 && selectedEmployees.length <= 3 ? (
               <span>{selectedEmployees.map((employee) => employee.name).join(", ")}</span>
+            ) : selectedEmployees.length > 3 ? (
+              <span>Выбрано: {formatEmployees(selectedEmployees.length)}</span>
             ) : null}
           </div>
 
           {showSafeThresholdWarning ? (
-            <p className="grant-warning">Проверьте сумму начисления перед отправкой.</p>
+            <p className="grant-warning">Проверьте сумму операции перед отправкой.</p>
           ) : null}
 
           <button
@@ -278,6 +377,102 @@ export function GrantCoinsPanel(props: GrantCoinsPanelProps) {
           >
             {submitLabel}
           </button>
+        </div>
+
+        <div className="admin-grant-support">
+          <div className="admin-grant-column-label">Импорт</div>
+          <div className="grant-import-card">
+            <div className="grant-import-head">
+              <strong>Загрузка через таблицу</strong>
+              <span>
+                {isDeduction
+                  ? "CSV или TSV с колонками: получатель, мерчики, причина списания. В таблице указывайте сумму, которую нужно списать у каждого получателя."
+                  : "CSV или TSV с колонками: получатель, мерчики, причина начисления. В таблице указывайте сумму, которую нужно начислить каждому получателю."}
+              </span>
+            </div>
+            <div className="grant-import-actions">
+              <label className="action-button secondary compact file-button">
+                Загрузить таблицу
+                <input
+                  accept=".csv,.tsv,text/csv,text/tab-separated-values"
+                  hidden
+                  onChange={(event) => {
+                    props.onImportTable(event.target.files?.[0] ?? null);
+                    event.target.value = "";
+                  }}
+                  type="file"
+                />
+              </label>
+              <button className="link-button" onClick={props.onDownloadTemplate} type="button">
+                Скачать шаблон
+              </button>
+            </div>
+            <span className="grant-import-detail">{props.importState.detail}</span>
+            <div className="grant-import-template">
+              <strong>Пример строки</strong>
+              <code>
+                {isDeduction
+                  ? "anna@company.test, 50, Корректировка баланса"
+                  : "anna@company.test, 50, Бонус за релиз"}
+              </code>
+            </div>
+            {props.importPreview ? (
+              <div className="grant-import-preview">
+                <div className="grant-import-preview-head">
+                  <strong>{props.importPreview.fileName}</strong>
+                  <span>Найдено строк: {props.importPreview.rows.length}</span>
+                </div>
+                <div className="grant-import-preview-table" role="table" aria-label="Предпросмотр таблицы начислений">
+                  <div className="grant-import-preview-row grant-import-preview-row-head" role="row">
+                    <span role="columnheader">Получатель</span>
+                    <span role="columnheader">Мерчики</span>
+                    <span role="columnheader">Причина</span>
+                  </div>
+                  {props.importPreview.sample.map((row, index) => (
+                    <div className="grant-import-preview-row" key={`${row.recipient}-${index}`} role="row">
+                      <span role="cell">{row.recipient}</span>
+                      <span role="cell">{row.amount}</span>
+                      <span role="cell">{row.reason}</span>
+                    </div>
+                  ))}
+                </div>
+                {props.importPreview.rows.length > props.importPreview.sample.length ? (
+                  <span className="grant-import-detail">
+                    Показаны первые {props.importPreview.sample.length} строк.
+                  </span>
+                ) : null}
+                <div className="grant-import-actions">
+                  <button
+                    className="action-button secondary compact"
+                    disabled={props.importState.phase === "processing"}
+                    onClick={props.onConfirmImport}
+                    type="button"
+                  >
+                    Загрузить в систему
+                  </button>
+                  <button className="link-button" onClick={props.onClearImportPreview} type="button">
+                    Очистить
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            {props.importState.phase === "processing" ? (
+              <div className="grant-import-progress">
+                <div className="grant-import-progress-bar">
+                  <div className="grant-import-progress-fill" style={{ width: `${importProgress}%` }} />
+                </div>
+                <span>
+                  {props.importState.processed ?? 0} / {props.importState.total ?? 0}
+                </span>
+              </div>
+            ) : null}
+            {props.importState.error ? <span className="grant-import-error">{props.importState.error}</span> : null}
+          </div>
+
+          <div className="grant-side-tip">
+            <strong>Как удобнее работать</strong>
+            <p>Сначала выберите получателей, затем тип операции и сумму. Для массовых операций можно загрузить таблицу.</p>
+          </div>
         </div>
       </div>
     </article>
@@ -350,15 +545,17 @@ export function GrantHistoryList({ entries, limit, onShowAll }: GrantHistoryList
     <article className="panel admin-panel-block">
       <div className="panel-head panel-head-stack">
         <div>
-          <h2>Последние начисления</h2>
-          <p>Ручные и автоматические операции в одном журнале.</p>
+          <h2>Последние операции с мерчиками</h2>
+          <p>Ручные и автоматические начисления и списания в одном журнале.</p>
         </div>
         {onShowAll ? (
           <button className="link-button" onClick={onShowAll} type="button">
             Показать все
           </button>
         ) : (
-          <span className="badge">{filteredEntries.length} записей</span>
+          <span className="badge">
+            {filteredEntries.length} {pluralizeRu(filteredEntries.length, "запись", "записи", "записей")}
+          </span>
         )}
       </div>
       <div className="grant-history-filters">
@@ -397,13 +594,13 @@ export function GrantHistoryList({ entries, limit, onShowAll }: GrantHistoryList
                       {entry.isAutomatic ? "Автоматическое" : "Ручное"}
                     </span>
                     {entry.employeeNames.length > 1 ? (
-                      <span className="grant-group-count">{entry.employeeNames.length} сотрудников</span>
+                      <span className="grant-group-count">{formatEmployees(entry.employeeNames.length)}</span>
                     ) : null}
                   </div>
                   <p>{entry.reason}</p>
                 </div>
                 <div className="grant-history-meta">
-                  <strong>+{entry.amount} коинов</strong>
+                  <strong>{entry.amount > 0 ? "+" : "−"}{formatMerchiki(Math.abs(entry.amount))}</strong>
                   <span>{entry.date}</span>
                 </div>
               </div>
@@ -425,7 +622,7 @@ export function GrantHistoryList({ entries, limit, onShowAll }: GrantHistoryList
   );
 }
 
-export function AdminOrdersPanel({ orders, onUpdateStatus }: AdminOrdersPanelProps) {
+export function AdminOrdersPanel({ bulkState, orders, onCancelOrder, onUpdateStatus }: AdminOrdersPanelProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"Все" | OrderStatus>("Все");
   const [deliveryFilter, setDeliveryFilter] =
@@ -535,7 +732,7 @@ export function AdminOrdersPanel({ orders, onUpdateStatus }: AdminOrdersPanelPro
       <div className="admin-section-head">
         <div>
           <h2>Управление заказами</h2>
-          <p>Компактный список заказов сотрудников с получением, статусами и быстрыми действиями.</p>
+          <p>Рабочий список заказов с получением, статусами и быстрыми действиями.</p>
         </div>
       </div>
 
@@ -614,7 +811,7 @@ export function AdminOrdersPanel({ orders, onUpdateStatus }: AdminOrdersPanelPro
             </div>
 
             <div className="admin-order-toolbar-meta">
-              <span>Найдено: {filteredOrders.length}</span>
+              <span>Найдено: {formatOrders(filteredOrders.length)}</span>
               <div className="admin-order-toolbar-actions">
                 <button className="link-button" onClick={toggleAllFiltered} type="button">
                   {allFilteredSelected ? "Снять выбор" : "Выбрать найденные"}
@@ -631,7 +828,7 @@ export function AdminOrdersPanel({ orders, onUpdateStatus }: AdminOrdersPanelPro
 
         {selectedOrderIds.length > 0 ? (
           <div className="catalog-bulk-bar admin-order-bulk-bar">
-            <strong>Выбрано: {selectedOrderIds.length}</strong>
+                <strong>Выбрано: {formatOrders(selectedOrderIds.length)}</strong>
             <div className="catalog-bulk-actions">
               {bulkConfirmCount > 0 ? (
                 <button className="link-button" onClick={() => runBulkOrderAction("Подтверждён")} type="button">
@@ -652,18 +849,50 @@ export function AdminOrdersPanel({ orders, onUpdateStatus }: AdminOrdersPanelPro
           </div>
         ) : null}
 
+        {bulkState && bulkState.phase !== "idle" ? (
+          <div className="bulk-progress-card">
+            <div className="bulk-progress-head">
+              <strong>{bulkState.title}</strong>
+              {bulkState.total ? (
+                <span>
+                  {bulkState.processed ?? 0} / {bulkState.total}
+                </span>
+              ) : null}
+            </div>
+            <span className="bulk-progress-detail">{bulkState.detail}</span>
+            {bulkState.total ? (
+              <div className="grant-import-progress">
+                <div className="grant-import-progress-bar">
+                  <div
+                    className="grant-import-progress-fill"
+                    style={{ width: `${Math.round((((bulkState.processed ?? 0) / bulkState.total) || 0) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="admin-orders-list">
           {groupedOrders.map((group) => (
             <section className="admin-order-group" key={group.date}>
               <div className="admin-order-group-head">
                 <strong>{group.date}</strong>
-                <span>{group.items.length} заказов</span>
+                <span>{formatOrders(group.items.length)}</span>
+              </div>
+              <div className="admin-order-columns" aria-hidden="true">
+                <span />
+                <span>Заказ</span>
+                <span>Получение</span>
+                <span>Статус</span>
+                <span>Действие</span>
               </div>
               <div className="admin-order-group-list">
                 {group.items.map((order) => {
                   const nextStatus = getNextOrderStatus(order.status);
                   const nextStatusLabel = getNextOrderStatusLabel(order.status);
-                  const requiresAction = order.status !== "Доставлен";
+                  const requiresAction = order.status !== "Доставлен" && order.status !== "Отменён";
+                  const isCompleted = order.status === "Доставлен" || order.status === "Отменён";
                   const deliveryBadge = isDeliveryOrder(order)
                     ? "🚚 Доставка"
                     : order.deliveryMethod === "samara-office"
@@ -672,7 +901,7 @@ export function AdminOrdersPanel({ orders, onUpdateStatus }: AdminOrdersPanelPro
 
                   return (
                     <article
-                      className="order-card admin-order-card compact"
+                      className={isCompleted ? "order-card admin-order-card compact completed" : "order-card admin-order-card compact"}
                       key={order.id}
                       onClick={() => setDetailsOrder(order)}
                       onKeyDown={(event) => {
@@ -695,7 +924,7 @@ export function AdminOrdersPanel({ orders, onUpdateStatus }: AdminOrdersPanelPro
 
                         <div className="admin-order-primary">
                           <strong>{order.customerName ?? "Сотрудник не указан"}</strong>
-                          <span>{order.itemTitle}</span>
+                          <span className="admin-order-item-line">{order.itemTitle}</span>
                         </div>
 
                         <div className="admin-order-meta compact">
@@ -703,15 +932,30 @@ export function AdminOrdersPanel({ orders, onUpdateStatus }: AdminOrdersPanelPro
                           <span>{order.date}</span>
                         </div>
 
-                        <div className="admin-order-status-wrap">
-                          <span className={`admin-order-status-badge ${order.status === "Создан" ? "created" : order.status === "Подтверждён" ? "confirmed" : order.status === "Отправлен" ? "shipped" : "delivered"}`}>
+                        <div className={isCompleted ? "admin-order-status-wrap completed" : "admin-order-status-wrap"}>
+                          <span className={`admin-order-status-badge ${order.status === "Создан" ? "created" : order.status === "Подтверждён" ? "confirmed" : order.status === "Отправлен" ? "shipped" : order.status === "Отменён" ? "cancelled" : "delivered"}`}>
                             ● {order.status}
                           </span>
-                          {requiresAction ? <span className="admin-order-requires-action">Требует действия</span> : null}
+                          <span className={requiresAction ? "admin-order-requires-action" : "admin-order-requires-action done"}>
+                            {getOrderActionHint(order.status)}
+                          </span>
                         </div>
 
                         <div className="admin-order-actions" onClick={(event) => event.stopPropagation()}>
-                          {nextStatus && nextStatusLabel ? (
+                          {order.status === "Создан" ? (
+                            <div className="admin-order-inline-actions">
+                              <button
+                                className="action-button secondary compact"
+                                onClick={() => onUpdateStatus([order.id], "Подтверждён")}
+                                type="button"
+                              >
+                                Подтвердить
+                              </button>
+                              <button className="link-button muted-link" onClick={() => onCancelOrder(order.id)} type="button">
+                                Отменить
+                              </button>
+                            </div>
+                          ) : nextStatus && nextStatusLabel ? (
                             <button
                               className="action-button secondary compact"
                               onClick={() => onUpdateStatus([order.id], nextStatus)}
@@ -719,6 +963,10 @@ export function AdminOrdersPanel({ orders, onUpdateStatus }: AdminOrdersPanelPro
                             >
                               {nextStatusLabel}
                             </button>
+                          ) : isCompleted ? (
+                            <span className={order.status === "Отменён" ? "admin-order-complete-note cancelled" : "admin-order-complete-note"}>
+                              {order.status === "Отменён" ? "Заказ отменён" : "Заказ завершён"}
+                            </span>
                           ) : null}
                         </div>
                       </div>
@@ -794,7 +1042,30 @@ export function AdminOrdersPanel({ orders, onUpdateStatus }: AdminOrdersPanelPro
                         </>
                       ) : null}
                     </div>
-                    {getNextOrderStatus(detailsOrder.status) && getNextOrderStatusLabel(detailsOrder.status) ? (
+                    {detailsOrder.status === "Создан" ? (
+                      <div className="admin-order-details-actions">
+                        <button
+                          className="action-button secondary"
+                          onClick={() => {
+                            onCancelOrder(detailsOrder.id);
+                            setDetailsOrder((current) => (current ? { ...current, status: "Отменён" } : current));
+                          }}
+                          type="button"
+                        >
+                          Отменить заказ
+                        </button>
+                        <button
+                          className="action-button"
+                          onClick={() => {
+                            onUpdateStatus([detailsOrder.id], "Подтверждён");
+                            setDetailsOrder((current) => (current ? { ...current, status: "Подтверждён" } : current));
+                          }}
+                          type="button"
+                        >
+                          Подтвердить
+                        </button>
+                      </div>
+                    ) : getNextOrderStatus(detailsOrder.status) && getNextOrderStatusLabel(detailsOrder.status) ? (
                       <div className="admin-order-details-actions">
                         <button
                           className="action-button"
@@ -840,7 +1111,13 @@ const russianMonthMap: Record<string, number> = {
 };
 
 function parseRussianDateLabel(value: string) {
-  const match = value.trim().match(/^(\d{1,2})\s+([а-яё]+)(?:\s+(\d{4}))?$/i);
+  const normalized = value.trim();
+  const isoCandidate = new Date(normalized);
+  if (Number.isFinite(isoCandidate.getTime())) {
+    return isoCandidate;
+  }
+
+  const match = normalized.match(/^(\d{1,2})\s+([а-яё]+)(?:\s+(\d{4}))?(?:\s*г\.?)?$/i);
   if (!match) {
     return null;
   }
@@ -857,22 +1134,37 @@ function parseRussianDateLabel(value: string) {
   return Number.isFinite(parsed.getTime()) ? parsed : null;
 }
 
+function getZonedDayStamp(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone: APP_TIMEZONE,
+  }).formatToParts(date);
+  const year = Number(parts.find((part) => part.type === "year")?.value ?? date.getUTCFullYear());
+  const month = Number(parts.find((part) => part.type === "month")?.value ?? date.getUTCMonth() + 1);
+  const day = Number(parts.find((part) => part.type === "day")?.value ?? date.getUTCDate());
+  return Date.UTC(year, month - 1, day);
+}
+
 function isWithinDays(value: Date | null, days: number) {
   if (!value) {
     return false;
   }
 
-  const now = new Date(Date.UTC(2026, 2, 12));
-  const diff = now.getTime() - value.getTime();
-  if (diff < 0) {
+  const nowStamp = getZonedDayStamp(new Date());
+  const valueStamp = getZonedDayStamp(value);
+  const diffDays = Math.floor((nowStamp - valueStamp) / (24 * 60 * 60 * 1000));
+
+  if (diffDays < 0) {
     return false;
   }
 
   if (days === 0) {
-    return diff < 24 * 60 * 60 * 1000;
+    return diffDays === 0;
   }
 
-  return diff <= days * 24 * 60 * 60 * 1000;
+  return diffDays <= days;
 }
 
 function stockSummary(item: MerchItem) {
@@ -1050,6 +1342,30 @@ export function CatalogTable(props: CatalogTableProps) {
                 Удалить
               </button>
             </div>
+          </div>
+        ) : null}
+
+        {props.bulkState && props.bulkState.phase !== "idle" ? (
+          <div className="bulk-progress-card">
+            <div className="bulk-progress-head">
+              <strong>{props.bulkState.title}</strong>
+              {props.bulkState.total ? (
+                <span>
+                  {props.bulkState.processed ?? 0} / {props.bulkState.total}
+                </span>
+              ) : null}
+            </div>
+            <span className="bulk-progress-detail">{props.bulkState.detail}</span>
+            {props.bulkState.total ? (
+              <div className="grant-import-progress">
+                <div className="grant-import-progress-bar">
+                  <div
+                    className="grant-import-progress-fill"
+                    style={{ width: `${Math.round((((props.bulkState.processed ?? 0) / props.bulkState.total) || 0) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
 
@@ -1260,7 +1576,13 @@ export function ProductEditorModal(props: ProductEditorModalProps) {
   }
 
   const hasImage = Boolean(draft.imageUrl);
-  const knownCategories = Array.from(new Set([...baseCatalogCategories, ...props.existingCategories]));
+  const knownCategories = Array.from(
+    new Set(
+      [...baseCatalogCategories, ...props.existingCategories].filter(
+        (category) => category.trim() && category !== "Все",
+      ),
+    ),
+  );
   const usesCustomCategory = draft.category ? !knownCategories.includes(draft.category) : false;
   const trimmedTitle = draft.title.trim();
   const normalizedSizes = draft.sizes ?? [];
@@ -1322,55 +1644,18 @@ export function ProductEditorModal(props: ProductEditorModalProps) {
       >
         <div className="panel-head">
           <h2>{draft.id ? "Редактировать товар" : "Создать товар"}</h2>
-          <button className="link-button" onClick={props.onClose} type="button">
-            Закрыть
-          </button>
         </div>
 
         <div className="editor-modal-grid">
           <div className="editor-preview-column">
             <section className="editor-form-section editor-preview-section">
               <div className="editor-section-head">
-                <h3>Карточка товара</h3>
-                <span>Как увидит сотрудник</span>
-              </div>
-              <div
-                className={
-                  draft.imageFit === "cover"
-                    ? "product-image admin-preview cover draggable"
-                    : "product-image admin-preview draggable"
-                }
-                onPointerCancel={props.onEditorPreviewPointerUp}
-                onPointerDown={props.onEditorPreviewPointerDown}
-                onPointerMove={props.onEditorPreviewPointerMove}
-                onPointerUp={props.onEditorPreviewPointerUp}
-              >
-                {draft.imageUrl ? (
-                  <img
-                    alt={draft.title}
-                    src={draft.imageUrl}
-                    style={{
-                      objectPosition: `${draft.imagePositionX ?? 50}% ${draft.imagePositionY ?? 50}%`,
-                    }}
-                  />
-                ) : (
-                  <span>{draft.title || "Товар без фото"}</span>
-                )}
-              </div>
-              <div className="editor-product-preview">
-                <strong>{draft.title || "Новый товар"}</strong>
-                <span>{draft.priceCoins} коинов</span>
-                <p>{previewAvailability}</p>
+                <h3>Фото товара</h3>
+                <span>Загрузка и предпросмотр</span>
               </div>
               <p className="editor-preview-hint">
-                После загрузки фото здесь сразу появится итоговый вид карточки. При необходимости изображение можно заново подогнать.
+                Загрузите фото, при необходимости подгоните кадр и сразу проверьте, как карточка будет выглядеть в магазине.
               </p>
-            </section>
-            <section className="editor-form-section editor-upload-section">
-              <div className="editor-section-head">
-                <h3>Фото товара</h3>
-                <span>Загрузка и кадрирование</span>
-              </div>
               <input
                 accept="image/png,image/jpeg,image/webp"
                 className="file-input-hidden"
@@ -1379,20 +1664,37 @@ export function ProductEditorModal(props: ProductEditorModalProps) {
                 id="catalog-image-input"
                 type="file"
               />
-              <div className="editor-upload-card">
-                <p className="editor-upload-intro">
-                  Перетащите изображение сюда или выберите файл. После загрузки сразу откроется окно кадрирования.
-                </p>
+              {hasImage ? (
                 <div
-                  aria-label="Зона загрузки фото товара"
+                  className={
+                    draft.imageFit === "cover"
+                      ? "product-image admin-preview cover draggable"
+                      : "product-image admin-preview draggable"
+                  }
+                  onPointerCancel={props.onEditorPreviewPointerUp}
+                  onPointerDown={props.onEditorPreviewPointerDown}
+                  onPointerMove={props.onEditorPreviewPointerMove}
+                  onPointerUp={props.onEditorPreviewPointerUp}
+                >
+                  <img
+                    alt={draft.title}
+                    src={draft.imageUrl}
+                    style={{
+                      objectPosition: `${draft.imagePositionX ?? 50}% ${draft.imagePositionY ?? 50}%`,
+                    }}
+                  />
+                </div>
+              ) : (
+                <div
+                  aria-label="Загрузить фото товара"
                   className={
                     isDropzoneActive
-                      ? "editor-upload-dropzone active"
+                      ? "product-image admin-preview editor-image-picker active"
                       : props.photoUploadState.phase === "error"
-                        ? "editor-upload-dropzone error"
+                        ? "product-image admin-preview editor-image-picker error"
                         : props.photoUploadState.phase === "loading"
-                          ? "editor-upload-dropzone loading"
-                          : "editor-upload-dropzone"
+                          ? "product-image admin-preview editor-image-picker loading"
+                          : "product-image admin-preview editor-image-picker"
                   }
                   onClick={openFilePicker}
                   onDragEnter={(event) => {
@@ -1421,34 +1723,34 @@ export function ProductEditorModal(props: ProductEditorModalProps) {
                   role="button"
                   tabIndex={0}
                 >
-                  <div className={draft.imageFit === "cover" ? "editor-upload-thumb cover" : "editor-upload-thumb"}>
-                    {draft.imageUrl ? (
-                      <img
-                        alt={draft.title || "Фото товара"}
-                        src={draft.imageUrl}
-                        style={{
-                          objectPosition: `${draft.imagePositionX ?? 50}% ${draft.imagePositionY ?? 50}%`,
-                        }}
-                      />
-                    ) : (
-                      <span>Фото не выбрано</span>
-                    )}
+                  <div className="editor-image-picker-copy">
+                    <strong>{draft.title || "Товар без фото"}</strong>
+                    <span>Нажмите, чтобы загрузить фото</span>
                   </div>
-                  <div className="editor-upload-copy">
-                    <strong className="editor-upload-title">
-                      {props.photoUploadState.phase === "loading"
-                        ? "Загружаем фото..."
-                        : hasImage
-                          ? "Фото готово"
-                          : "Загрузите изображение для карточки товара"}
-                    </strong>
-                    <p className="editor-upload-hint">{props.photoUploadState.detail}</p>
-                    <div className="editor-upload-meta">
-                      <span className="file-input-status">Поддерживаются PNG, JPG, WEBP</span>
-                      <span className="file-input-status">Максимум: 10 MB</span>
-                      <span className="file-input-status">Рекомендуем от 1200 × 1200 px</span>
-                    </div>
-                  </div>
+                </div>
+              )}
+              <div className="editor-upload-inline">
+                <div className="editor-upload-inline-copy">
+                  {props.photoUploadState.phase === "loading" ? <strong>Загружаем фото...</strong> : null}
+                  {props.photoUploadState.phase !== "loading" && hasImage ? <strong>Фото готово</strong> : null}
+                  <span>
+                    Поддерживаются PNG, JPG, WEBP · Максимум 10 MB · Рекомендуем от 1200 × 1200 px
+                  </span>
+                </div>
+                <div className="editor-upload-actions">
+                  <button className="action-button" onClick={openFilePicker} type="button">
+                    {hasImage ? "Заменить фото" : "Выбрать файл"}
+                  </button>
+                  {hasImage ? (
+                    <button className="action-button secondary" onClick={props.onRecropImage} type="button">
+                      Подогнать кадр
+                    </button>
+                  ) : null}
+                  {hasImage ? (
+                    <button className="link-button muted-link" onClick={props.onRemoveImage} type="button">
+                      Удалить фото
+                    </button>
+                  ) : null}
                 </div>
                 {(props.photoUploadState.fileName || props.photoUploadState.error || props.photoUploadState.warning) ? (
                   <div className="editor-upload-feedback">
@@ -1463,34 +1765,15 @@ export function ProductEditorModal(props: ProductEditorModalProps) {
                         </span>
                       </div>
                     ) : null}
-                    {props.photoUploadState.error ? (
-                      <p className="field-error">{props.photoUploadState.error}</p>
-                    ) : null}
-                    {props.photoUploadState.warning ? (
-                      <p className="editor-helper-text">{props.photoUploadState.warning}</p>
-                    ) : null}
+                    {props.photoUploadState.error ? <p className="field-error">{props.photoUploadState.error}</p> : null}
+                    {props.photoUploadState.warning ? <p className="editor-helper-text">{props.photoUploadState.warning}</p> : null}
                     {props.photoUploadState.hasTransparency ? (
                       <p className="editor-helper-text">Прозрачные области PNG будут сохранены.</p>
                     ) : null}
                   </div>
                 ) : null}
-                <div className="editor-upload-actions">
-                  <button className="action-button" onClick={openFilePicker} type="button">
-                    {hasImage ? "Заменить фото" : "Выбрать файл"}
-                  </button>
-                  {hasImage ? (
-                    <button className="action-button secondary" onClick={props.onRecropImage} type="button">
-                      Подогнать кадр
-                    </button>
-                  ) : null}
-                </div>
               </div>
             </section>
-            {hasImage ? (
-              <button className="link-button muted-link" onClick={props.onRemoveImage} type="button">
-                Удалить фото
-              </button>
-            ) : null}
           </div>
 
           <div className="editor-form-column">
@@ -1545,7 +1828,7 @@ export function ProductEditorModal(props: ProductEditorModalProps) {
                 />
               </label>
               <label className="field">
-                <span>Цена (коины)</span>
+                <span>Цена (мерчики)</span>
                 <input
                   inputMode="numeric"
                   pattern="[0-9]*"

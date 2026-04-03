@@ -6,7 +6,7 @@ export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as {
       postId: string;
-      reaction: "thanks" | "celebrate" | "support" | "fire";
+      reaction: "thanks" | "celebrate" | "support" | "fire" | "sparkle";
       userId?: string;
     };
     const snapshot = await reactToPost(body);

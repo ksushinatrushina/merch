@@ -15,8 +15,15 @@ export default async function Page({ searchParams }: PageProps) {
 
   const initialMode = modeParam === "admin" ? "ADMIN" : "EMPLOYEE";
   const initialEmployeeTab =
-    tabParam === "store" ? "STORE" : tabParam === "history" ? "HISTORY" : "PROFILE";
-  const initialAdminTab = tabParam === "catalog" ? "CATALOG" : "GRANTS";
+    tabParam === "profile" ? "PROFILE" : tabParam === "history" ? "HISTORY" : "STORE";
+  const initialAdminTab =
+    tabParam === "catalog"
+      ? "CATALOG"
+      : tabParam === "orders"
+        ? "ORDERS"
+        : tabParam === "admins"
+          ? "ADMINS"
+          : "GRANTS";
 
   return (
     <HomePageClient

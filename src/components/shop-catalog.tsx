@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { MerchItem, MerchSizeStock } from "@/lib/domain/types";
+import { formatMerchiki } from "@/lib/russian";
 
 export type ShopCategory = string;
 export type ShopSortMode =
@@ -252,7 +253,7 @@ function PurchaseOptionsPanel({
 
       <div className="purchase-inline-summary">
         <span>Итого</span>
-        <strong>{totalPrice} коинов</strong>
+        <strong>{totalPrice} мерчиков</strong>
       </div>
 
       <button
@@ -366,7 +367,7 @@ function ProductDetailsModal({
 
             <div className="product-copy product-details-title">
               <h3>{item.title}</h3>
-              <strong className="price-label">{item.priceCoins} коинов</strong>
+              <strong className="price-label">{item.priceCoins} мерчиков</strong>
             </div>
 
             <ProductAffordabilityState
@@ -449,7 +450,6 @@ function ProductCard({
           <button className="product-title-button" onClick={onToggleExpand} type="button">
             <span className="product-title-text">{item.title}</span>
           </button>
-          <strong className="price-label">{item.priceCoins} коинов</strong>
         </div>
 
         <div className="product-inline-status">
@@ -470,7 +470,7 @@ function ProductCard({
       {!unavailable ? (
         <div className="product-actions compact">
           <button className="action-button product-button" disabled={!affordable} onClick={onToggleExpand} type="button">
-            Купить за {item.priceCoins}
+            Купить за {formatMerchiki(item.priceCoins)}
           </button>
         </div>
       ) : null}

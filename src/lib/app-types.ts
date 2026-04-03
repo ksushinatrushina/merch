@@ -2,6 +2,7 @@ import type { MerchItem, MonthlyGiftQuota, User } from "@/lib/domain/types";
 
 export type CoinHistoryEntry = {
   id: string;
+  userId?: string;
   amount: number;
   title: string;
   source?: string;
@@ -27,14 +28,19 @@ export type GrantHistoryEntry = {
   date: string;
 };
 
-export type OrderStatus = "Создан" | "Подтверждён" | "Отправлен" | "Доставлен";
+export type OrderStatus = "Создан" | "Подтверждён" | "Отправлен" | "Доставлен" | "Отменён";
 
 export type OrderDeliveryMethod = "moscow-office" | "samara-office" | "delivery";
 
 export type OrderCard = {
   id: string;
+  customerId?: string;
   customerName?: string;
+  itemId?: string;
   itemTitle: string;
+  quantity?: number;
+  size?: string;
+  totalCoins?: number;
   status: OrderStatus;
   delivery: string;
   deliveryMethod?: OrderDeliveryMethod;
@@ -42,9 +48,10 @@ export type OrderCard = {
   deliveryPostalCode?: string;
   deliveryPhone?: string;
   date: string;
+  cancelledBy?: string;
 };
 
-export type ReactionKey = "thanks" | "celebrate" | "support" | "fire";
+export type ReactionKey = "thanks" | "celebrate" | "support" | "fire" | "sparkle";
 
 export type GratitudePost = {
   id: string;
@@ -69,11 +76,14 @@ export type GratitudePost = {
 
 export type PersistedAppState = {
   users: User[];
+  quotas?: Record<string, MonthlyGiftQuota>;
   quota: MonthlyGiftQuota;
+  automationStartedAt?: string;
   catalog: MerchItem[];
   history: CoinHistoryEntry[];
   grantHistory: GrantHistoryEntry[];
   birthdayGrants: string[];
+  automatedGrantKeys?: string[];
   notifications: Notification[];
   orders: OrderCard[];
   gratitudeFeed: GratitudePost[];

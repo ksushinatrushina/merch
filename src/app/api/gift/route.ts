@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
     const snapshot = await sendGift(body);
     return NextResponse.json(snapshot);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Не удалось отправить коины.";
+    const message = error instanceof Error ? error.message : "Не удалось отправить мерчики.";
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }

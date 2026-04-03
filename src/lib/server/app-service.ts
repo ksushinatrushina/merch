@@ -1,20 +1,31 @@
 import "server-only";
 
-import { assertAdminCanGrantCoins, assertGiftTransferAllowed } from "@/lib/domain/coins";
+import { assertAdminCanGrantCoins, assertCanManageOrders, assertGiftTransferAllowed } from "@/lib/domain/coins";
 import { buildOrderPreview } from "@/lib/domain/orders";
 import type { AppSnapshot, ReactionKey } from "@/lib/app-types";
 import type { MerchItem, User } from "@/lib/domain/types";
 import { buildSnapshot, readAppState, resetAppState, updateAppState } from "@/lib/server/app-store";
 import { currentUser } from "@/lib/mock-data";
+import { formatEmployees, formatMerchiki, formatOrders } from "@/lib/russian";
 
 const employeeId = currentUser.id;
+const APP_TIMEZONE = "Europe/Luxembourg";
 
 function nowDateLabel() {
-  return "12 марта 2026";
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: APP_TIMEZONE,
+  }).format(new Date());
 }
 
 function nowOrderDateLabel() {
-  return "14 марта";
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "long",
+    timeZone: APP_TIMEZONE,
+  }).format(new Date());
 }
 
 function findUserName(snapshot: AppSnapshot, userId: string) {
@@ -32,6 +43,13 @@ function requireAdmin(user: User | undefined) {
   if (!user || user.role !== "ADMIN") {
     throw new Error("Недостаточно прав для этого действия.");
   }
+}
+
+function requireOrderManagerAccess(user: User | undefined) {
+  if (!user) {
+    throw new Error("Недостаточно прав для этого действия.");
+  }
+  assertCanManageOrders(user);
 }
 
 export async function authenticateUser(input: { username: string; password: string }) {
@@ -102,22 +120,52 @@ export async function sendGift(input: {
       sender,
       recipient,
       amount: input.amount,
-      quota: state.quota,
+      quota:
+        state.quotas?.[sender.id] ??
+        state.quota ??
+        {
+          userId: sender.id,
+          year: new Date().getUTCFullYear(),
+          month: new Date().getUTCMonth() + 1,
+          sentCoins: 0,
+        },
     });
 
     recipient.coinBalance += input.amount;
-    state.quota.sentCoins += input.amount;
+    state.quotas ??= {};
+    state.quotas[sender.id] = {
+      ...(state.quotas[sender.id] ?? state.quota ?? { userId: sender.id, year: 0, month: 0, sentCoins: 0 }),
+      userId: sender.id,
+      sentCoins:
+        (state.quotas[sender.id]?.sentCoins ?? (state.quota?.userId === sender.id ? state.quota.sentCoins : 0)) +
+        input.amount,
+    };
     state.history.unshift({
       id: `h-${Date.now()}`,
+      userId: sender.id,
       amount: -input.amount,
       title: input.reason,
       source: recipient.name,
+      counterpartName: recipient.name,
+      createdAt: new Date().toISOString(),
+      type: "gratitude",
+      date: nowDateLabel(),
+    });
+    state.history.unshift({
+      id: `h-incoming-${Date.now()}`,
+      userId: recipient.id,
+      amount: input.amount,
+      title: input.reason,
+      source: `От: ${sender.name}`,
+      counterpartName: sender.name,
+      createdAt: new Date().toISOString(),
+      type: "gratitude",
       date: nowDateLabel(),
     });
     if (recipient.id === employeeId) {
       state.notifications.unshift({
         id: `n-incoming-${Date.now()}`,
-        text: `Вам начислено ${input.amount} коинов от ${sender.name}. Причина: ${input.reason}`,
+        text: `Вам начислено ${formatMerchiki(input.amount)} от ${sender.name}. Причина: ${input.reason}`,
         unread: true,
       });
     }
@@ -133,10 +181,10 @@ export async function sendGift(input: {
       reason: input.reason,
       message: `За ${input.reason.toLowerCase()}.`,
       date: nowDateLabel(),
-      reactions: { thanks: 0, celebrate: 0, support: 0, fire: 0 },
-      reactionUsers: { thanks: [], celebrate: [], support: [], fire: [] },
+      reactions: { thanks: 0, celebrate: 0, support: 0, fire: 0, sparkle: 0 },
+      reactionUsers: { thanks: [], celebrate: [], support: [], fire: [], sparkle: [] },
     });
-    state.activity.unshift(`${sender.name} подарил ${input.amount} коинов коллеге ${recipient.name}.`);
+    state.activity.unshift(`${sender.name} подарил ${formatMerchiki(input.amount)} коллеге ${recipient.name}.`);
 
     return buildSnapshot(state, sender.id);
   });
@@ -206,8 +254,13 @@ export async function createOrder(input: {
 
     state.orders.unshift({
       id: `o-${Date.now()}`,
+      customerId: employee.id,
       customerName: employee.name,
+      itemId: item.id,
       itemTitle: `${item.title} · ${input.size}`,
+      quantity: input.quantity,
+      size: input.size,
+      totalCoins: preview.totalCoins,
       status: "Создан",
       delivery: deliveryLabel,
       deliveryMethod,
@@ -218,8 +271,12 @@ export async function createOrder(input: {
     });
     state.history.unshift({
       id: `h-${Date.now()}`,
+      userId: employee.id,
       amount: -preview.totalCoins,
       title: `Покупка: ${item.title} ${input.size} x ${input.quantity}`,
+      counterpartName: item.title,
+      createdAt: new Date().toISOString(),
+      type: "purchase",
       date: nowDateLabel(),
     });
     state.notifications.unshift({
@@ -239,6 +296,7 @@ export async function grantCoins(input: {
   actorId: string;
   employeeIds: string[];
   coins: number;
+  operation?: "grant" | "deduct";
   reason?: string;
 }) {
   return updateAppState(async (state) => {
@@ -249,63 +307,78 @@ export async function grantCoins(input: {
 
     assertAdminCanGrantCoins(actor);
     if (input.coins <= 0) {
-      throw new Error("Сумма начисления должна быть больше нуля.");
+      throw new Error("Сумма операции должна быть больше нуля.");
     }
 
     if (input.employeeIds.length === 0) {
       throw new Error("Выберите хотя бы одного получателя.");
     }
 
-    const reason = input.reason?.trim() || "Начисление коинов";
+    const operation = input.operation ?? "grant";
+    const delta = operation === "deduct" ? -input.coins : input.coins;
+    const reason = input.reason?.trim() || (operation === "deduct" ? "Списание мерчиков" : "Начисление мерчиков");
     const recipients = state.users.filter((user) => input.employeeIds.includes(user.id));
 
     if (recipients.length === 0) {
       throw new Error("Не удалось найти выбранных получателей.");
     }
 
+    if (operation === "deduct") {
+      const insufficientRecipient = recipients.find((recipient) => recipient.coinBalance < input.coins);
+      if (insufficientRecipient) {
+        throw new Error(`У пользователя ${insufficientRecipient.name} недостаточно мерчиков для списания.`);
+      }
+    }
+
     for (const recipient of recipients) {
-      recipient.coinBalance += input.coins;
+      recipient.coinBalance += delta;
       state.notifications.unshift({
         id: `n-${Date.now()}-${recipient.id}`,
         text:
-          recipient.id === employeeId
-            ? `Вам начислено ${input.coins} коинов. Причина: ${reason}`
-            : `${recipient.name} получил ${input.coins} коинов. Причина: ${reason}`,
+          operation === "deduct"
+            ? `С вашего баланса списано ${formatMerchiki(input.coins)}. Причина: ${reason}`
+            : `Вам начислено ${formatMerchiki(input.coins)}. Причина: ${reason}`,
         unread: true,
       });
       state.history.unshift({
         id: `h-${Date.now()}-${recipient.id}`,
-        amount: input.coins,
+        userId: recipient.id,
+        amount: delta,
         title: reason,
         source: `От: ${actor.name}`,
+        counterpartName: actor.name,
+        createdAt: new Date().toISOString(),
+        type: operation === "grant" ? "grant" : "adjustment",
         date: nowDateLabel(),
       });
       state.grantHistory.unshift({
         id: `g-${Date.now()}-${recipient.id}`,
         adminName: actor.name,
         employeeName: recipient.name,
-        amount: input.coins,
+        amount: delta,
         reason,
         date: nowDateLabel(),
       });
     }
 
     state.activity.unshift(
-      `${actor.name} начислил ${input.coins} коинов ${recipients.length} пользователям. Причина: ${reason}.`,
+      operation === "deduct"
+        ? `${actor.name} списал ${formatMerchiki(input.coins)} у ${formatEmployees(recipients.length)}. Причина: ${reason}.`
+        : `${actor.name} начислил ${formatMerchiki(input.coins)} ${formatEmployees(recipients.length)}. Причина: ${reason}.`,
     );
 
-    return buildSnapshot(state, employeeId);
+    return buildSnapshot(state, actor.id);
   });
 }
 
 export async function updateOrderStatuses(input: {
   actorId: string;
   orderIds: string[];
-  status: "Создан" | "Подтверждён" | "Отправлен" | "Доставлен";
+  status: "Создан" | "Подтверждён" | "Отправлен" | "Доставлен" | "Отменён";
 }) {
   return updateAppState(async (state) => {
     const actor = state.users.find((user) => user.id === input.actorId);
-    requireAdmin(actor);
+    requireOrderManagerAccess(actor);
 
     if (input.orderIds.length === 0) {
       throw new Error("Выберите хотя бы один заказ.");
@@ -323,10 +396,79 @@ export async function updateOrderStatuses(input: {
     );
 
     state.activity.unshift(
-      `${actor?.name ?? "Администратор"} обновил статус ${updatedOrders.length} заказов: ${nextStatus}.`,
+      `${actor?.name ?? "Администратор"} обновил статус ${formatOrders(updatedOrders.length)}: ${nextStatus}.`,
     );
 
     return buildSnapshot(state, input.actorId);
+  });
+}
+
+export async function cancelOrder(input: { actorId: string; orderId: string }) {
+  return updateAppState(async (state) => {
+    const actor = state.users.find((user) => user.id === input.actorId);
+    if (!actor) {
+      throw new Error("Пользователь не найден.");
+    }
+
+    const order = state.orders.find((entry) => entry.id === input.orderId);
+    if (!order) {
+      throw new Error("Заказ не найден.");
+    }
+
+    const canManage = ["ADMIN", "ORDER_MANAGER"].includes(actor.role);
+    const canCancelOwnOrder = order.customerId === actor.id;
+    if (!canManage && !canCancelOwnOrder) {
+      throw new Error("Недостаточно прав для отмены заказа.");
+    }
+
+    if (order.status !== "Создан") {
+      throw new Error("Отменить можно только заказ со статусом «Создан».");
+    }
+
+    const customer = order.customerId ? state.users.find((user) => user.id === order.customerId) : undefined;
+    const item = order.itemId ? state.catalog.find((catalogItem) => catalogItem.id === order.itemId) : undefined;
+    const refundedCoins =
+      order.totalCoins ??
+      (item && order.quantity ? item.priceCoins * order.quantity : 0);
+
+    if (customer && refundedCoins > 0) {
+      customer.coinBalance += refundedCoins;
+      state.history.unshift({
+        id: `refund-${Date.now()}-${order.id}`,
+        userId: customer.id,
+        amount: refundedCoins,
+        title: `Отмена заказа: ${order.itemTitle}`,
+        source: canManage && actor.id !== customer.id ? `От: ${actor.name}` : "Возврат после отмены заказа",
+        counterpartName: canManage && actor.id !== customer.id ? actor.name : undefined,
+        createdAt: new Date().toISOString(),
+        type: "adjustment",
+        date: nowDateLabel(),
+      });
+      state.notifications.unshift({
+        id: `order-cancel-${Date.now()}-${order.id}`,
+        text:
+          actor.id === customer.id
+            ? `Ваш заказ отменён: ${order.itemTitle}. Возврат: ${formatMerchiki(refundedCoins)}.`
+            : `${actor.name} отменил ваш заказ: ${order.itemTitle}. Возврат: ${formatMerchiki(refundedCoins)}.`,
+        unread: true,
+      });
+    }
+
+    if (item && order.size && order.quantity) {
+      item.sizes = item.sizes?.map((entry) =>
+        entry.size === order.size ? { ...entry, stock: entry.stock + order.quantity! } : entry,
+      );
+      item.stock = item.sizes?.reduce((sum, entry) => sum + entry.stock, 0) ?? item.stock + order.quantity;
+    }
+
+    order.status = "Отменён";
+    order.cancelledBy = actor.name;
+
+    state.activity.unshift(
+      `${actor.name} отменил заказ "${order.itemTitle}"${customer ? ` пользователя ${customer.name}` : ""}.`,
+    );
+
+    return buildSnapshot(state, actor.id);
   });
 }
 
@@ -360,7 +502,7 @@ export async function updateCatalogField(input: {
       item[input.field] = input.value;
     }
 
-    return buildSnapshot(state, employeeId);
+    return buildSnapshot(state, input.actorId);
   });
 }
 
@@ -377,7 +519,7 @@ export async function updateCatalogSize(input: { actorId: string; itemId: string
     );
     item.stock = item.sizes.reduce((sum, entry) => sum + entry.stock, 0);
 
-    return buildSnapshot(state, employeeId);
+    return buildSnapshot(state, input.actorId);
   });
 }
 
@@ -392,7 +534,7 @@ export async function toggleCatalogItem(input: { actorId: string; itemId: string
     item.isActive = !item.isActive;
     state.activity.unshift("Администратор обновил доступность товара в каталоге.");
 
-    return buildSnapshot(state, employeeId);
+    return buildSnapshot(state, input.actorId);
   });
 }
 
@@ -410,7 +552,7 @@ export async function reactToPost(input: { postId: string; reaction: ReactionKey
       throw new Error("Пост не найден.");
     }
     const userId = input.userId ?? employeeId;
-    const reactionUsers = post.reactionUsers ?? { thanks: [], celebrate: [], support: [], fire: [] };
+    const reactionUsers = post.reactionUsers ?? { thanks: [], celebrate: [], support: [], fire: [], sparkle: [] };
     const currentUsers = reactionUsers[input.reaction] ?? [];
 
     if (currentUsers.includes(userId)) {
@@ -419,7 +561,7 @@ export async function reactToPost(input: { postId: string; reaction: ReactionKey
 
     reactionUsers[input.reaction] = [...currentUsers, userId];
     post.reactionUsers = reactionUsers;
-    post.reactions[input.reaction] += 1;
+    post.reactions[input.reaction] = (post.reactions[input.reaction] ?? 0) + 1;
     return buildSnapshot(state, userId);
   });
 }
@@ -455,7 +597,7 @@ export async function uploadCatalogImage(input: {
     item.imageFit = input.imageFit ?? item.imageFit ?? "contain";
     item.imagePositionX = Math.min(Math.max(input.imagePositionX ?? item.imagePositionX ?? 50, 0), 100);
     item.imagePositionY = Math.min(Math.max(input.imagePositionY ?? item.imagePositionY ?? 50, 0), 100);
-    return buildSnapshot(state, employeeId);
+    return buildSnapshot(state, input.actorId);
   });
 }
 
@@ -497,7 +639,7 @@ export async function upsertCatalogItem(input: {
       state.activity.unshift(`Администратор добавил товар "${normalizedItem.title}".`);
     }
 
-    return buildSnapshot(state, employeeId);
+    return buildSnapshot(state, input.actorId);
   });
 }
 
@@ -519,7 +661,7 @@ export async function duplicateCatalogItem(input: { actorId: string; itemId: str
 
     state.catalog.unshift(copy);
     state.activity.unshift(`Администратор создал копию товара "${item.title}".`);
-    return buildSnapshot(state, employeeId);
+    return buildSnapshot(state, input.actorId);
   });
 }
 
@@ -533,7 +675,7 @@ export async function deleteCatalogItem(input: { actorId: string; itemId: string
 
     state.catalog = state.catalog.filter((entry) => entry.id !== input.itemId);
     state.activity.unshift(`Администратор удалил товар "${item.title}".`);
-    return buildSnapshot(state, employeeId);
+    return buildSnapshot(state, input.actorId);
   });
 }
 
@@ -549,7 +691,7 @@ export async function setCatalogItemVisibility(input: { actorId: string; itemId:
     state.activity.unshift(
       `Администратор ${input.isActive ? "вернул в каталог" : "скрыл"} товар "${item.title}".`,
     );
-    return buildSnapshot(state, employeeId);
+    return buildSnapshot(state, input.actorId);
   });
 }
 
@@ -557,7 +699,7 @@ export function getEmployeeNameFromSnapshot(snapshot: AppSnapshot, userId: strin
   return findUserName(snapshot, userId);
 }
 
-export async function setUserRole(input: { actorId: string; targetUserId: string; role: "ADMIN" | "EMPLOYEE" }) {
+export async function setUserRole(input: { actorId: string; targetUserId: string; role: "ADMIN" | "EMPLOYEE" | "ORDER_MANAGER" }) {
   return updateAppState(async (state) => {
     const actor = state.users.find((user) => user.id === input.actorId);
     requireAdmin(actor);
@@ -579,9 +721,22 @@ export async function setUserRole(input: { actorId: string; targetUserId: string
       }
     }
 
+    if (target.role === "ADMIN" && input.role === "ORDER_MANAGER") {
+      const adminCount = state.users.filter((user) => user.role === "ADMIN").length;
+      if (adminCount <= 1) {
+        throw new Error("В системе должен остаться хотя бы один администратор.");
+      }
+    }
+
     target.role = input.role;
     state.activity.unshift(
-      `${adminActor.name} ${input.role === "ADMIN" ? "назначил администратором" : "вернул в сотрудники"} пользователя "${target.name}".`,
+      `${adminActor.name} ${
+        input.role === "ADMIN"
+          ? "назначил администратором"
+          : input.role === "ORDER_MANAGER"
+            ? "назначил менеджером доставки заказов"
+            : "вернул в сотрудники"
+      } пользователя "${target.name}".`,
     );
 
     return buildSnapshot(state, adminActor.id);

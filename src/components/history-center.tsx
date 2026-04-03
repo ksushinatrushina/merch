@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import type { CoinHistoryEntry, GratitudePost, ReactionKey } from "@/lib/app-types";
 import type { User } from "@/lib/domain/types";
+import { pluralizeRu } from "@/lib/russian";
 
 type HistoryPageProps = {
   coinTransactions: CoinHistoryEntry[];
@@ -15,7 +16,7 @@ type HistoryPageProps = {
 
 type CoinHistoryFilter = "Все" | "Покупки" | "Начисления" | "Благодарности";
 type CoinHistorySort = "Сначала новые" | "По сумме" | "По типу";
-type GratitudeFilter = "Все" | "От меня" | "Мне" | "Публичные";
+type GratitudeFilter = "Все" | "От меня" | "Мне";
 type TransactionKind = "purchase" | "grant" | "gratitude" | "adjustment";
 
 type NormalizedTransaction = {
@@ -38,14 +39,15 @@ type ReactionSummaryItem = {
 
 const coinHistoryFilters: CoinHistoryFilter[] = ["Все", "Покупки", "Начисления", "Благодарности"];
 const coinHistorySortModes: CoinHistorySort[] = ["Сначала новые", "По сумме", "По типу"];
-const gratitudeFilters: GratitudeFilter[] = ["Все", "От меня", "Мне", "Публичные"];
+const gratitudeFilters: GratitudeFilter[] = ["Все", "От меня", "Мне"];
 const reactionEmojiMap: Record<ReactionKey, string> = {
   thanks: "❤️",
   celebrate: "👏",
   fire: "🔥",
   support: "🤝",
+  sparkle: "✨",
 };
-const reactionMenuOrder: ReactionKey[] = ["thanks", "celebrate", "fire", "support"];
+const reactionMenuOrder: ReactionKey[] = ["thanks", "celebrate", "fire", "support", "sparkle"];
 const transactionTypeOrder: Record<TransactionKind, number> = {
   gratitude: 0,
   purchase: 1,
@@ -128,7 +130,6 @@ function reactionsSummary(post: GratitudePost): ReactionSummaryItem[] {
   return (Object.entries(post.reactions) as Array<[ReactionKey, number]>)
     .filter(([, count]) => count > 0)
     .sort((left, right) => right[1] - left[1])
-    .slice(0, 3)
     .map(([key, count]) => ({
       count,
       emoji: reactionEmojiMap[key],
@@ -137,11 +138,19 @@ function reactionsSummary(post: GratitudePost): ReactionSummaryItem[] {
 }
 
 function isCurrentUserSender(post: GratitudePost, currentUser: User) {
-  return post.senderId ? post.senderId === currentUser.id : post.from === currentUser.name;
+  return (
+    post.senderId === currentUser.id ||
+    post.senderName === currentUser.name ||
+    post.from === currentUser.name
+  );
 }
 
 function isCurrentUserReceiver(post: GratitudePost, currentUser: User) {
-  return post.receiverId ? post.receiverId === currentUser.id : post.to === currentUser.name;
+  return (
+    post.receiverId === currentUser.id ||
+    post.receiverName === currentUser.name ||
+    post.to === currentUser.name
+  );
 }
 
 function TransactionTypeBadge({ kind, label }: { kind: TransactionKind; label: string }) {
@@ -216,7 +225,7 @@ function CoinTransactionRow({ transaction }: { transaction: NormalizedTransactio
               {transaction.counterpartLabel}: {transaction.counterpart}
             </span>
           ) : null}
-          {typeof transaction.balanceAfter === "number" ? <span>Баланс: {transaction.balanceAfter}</span> : null}
+          {typeof transaction.balanceAfter === "number" ? <span>Баланс: {transaction.balanceAfter} мерчиков</span> : null}
         </div>
       </div>
     </div>
@@ -232,7 +241,6 @@ function CoinHistoryPanel({
 }) {
   const [filter, setFilter] = useState<CoinHistoryFilter>("Все");
   const [sortMode, setSortMode] = useState<CoinHistorySort>("Сначала новые");
-  const [visibleCount, setVisibleCount] = useState<number>(8);
 
   const filteredTransactions = useMemo(() => {
     const normalized = transactions.map(normalizeCoinTransaction);
@@ -263,24 +271,21 @@ function CoinHistoryPanel({
     return nextItems;
   }, [filter, sortMode, transactions]);
 
-  const visibleTransactions = filteredTransactions.slice(0, visibleCount);
-
   return (
     <article className="panel coin-history-panel">
       <div className="panel-head panel-head-stack history-panel-head">
         <div>
-          <h2>История коинов</h2>
+          <h2>История мерчиков</h2>
           <p>Покупки, начисления и все изменения баланса в одном списке</p>
         </div>
-        <span className="badge">{filteredTransactions.length} операций</span>
+        <span className="badge">
+          {filteredTransactions.length} {pluralizeRu(filteredTransactions.length, "операция", "операции", "операций")}
+        </span>
       </div>
 
       <CoinHistoryFilters
         filter={filter}
-        onFilterChange={(nextFilter) => {
-          setFilter(nextFilter);
-          setVisibleCount(8);
-        }}
+        onFilterChange={setFilter}
         onSortChange={setSortMode}
         sortMode={sortMode}
       />
@@ -291,9 +296,9 @@ function CoinHistoryPanel({
             <div className="history-skeleton-row" key={`coin-skeleton-${index}`} />
           ))}
         </div>
-      ) : visibleTransactions.length > 0 ? (
+      ) : filteredTransactions.length > 0 ? (
         <div className="coin-transaction-list">
-          {visibleTransactions.map((transaction) => (
+          {filteredTransactions.map((transaction) => (
             <CoinTransactionRow key={transaction.id} transaction={transaction} />
           ))}
         </div>
@@ -303,12 +308,6 @@ function CoinHistoryPanel({
           <p>Здесь появятся покупки, начисления и изменения баланса</p>
         </div>
       )}
-
-      {!loading && visibleCount < filteredTransactions.length ? (
-        <button className="action-button secondary history-more-button" onClick={() => setVisibleCount((count) => count + 8)} type="button">
-          Показать ещё
-        </button>
-      ) : null}
     </article>
   );
 }
@@ -433,7 +432,7 @@ function GratitudeCard({
           </strong>
           <span>{post.createdAt ?? post.date}</span>
         </div>
-        <div className="gratitude-card-amount">+{post.amount} коинов</div>
+        <div className="gratitude-card-amount">+{post.amount} мерчиков</div>
       </div>
 
       <p className="gratitude-card-message">{post.message || post.reason}</p>
@@ -459,7 +458,6 @@ function GratitudeFeedPanel({
   onReact: (postId: string, reaction: ReactionKey) => void;
 }) {
   const [filter, setFilter] = useState<GratitudeFilter>("Все");
-  const [visibleCount, setVisibleCount] = useState<number>(6);
 
   const filteredFeed = useMemo(() => {
     return feed.filter((post) => {
@@ -469,14 +467,9 @@ function GratitudeFeedPanel({
       if (filter === "Мне") {
         return isCurrentUserReceiver(post, currentUser);
       }
-      if (filter === "Публичные") {
-        return post.isPublic !== false;
-      }
       return true;
     });
   }, [currentUser, feed, filter]);
-
-  const visibleFeed = filteredFeed.slice(0, visibleCount);
 
   return (
     <article className="panel gratitude-feed-panel">
@@ -485,15 +478,14 @@ function GratitudeFeedPanel({
           <h2>Лента благодарностей</h2>
           <p>Публичная социальная активность команды</p>
         </div>
-        <span className="badge">{filteredFeed.length} записей</span>
+        <span className="badge">
+          {filteredFeed.length} {pluralizeRu(filteredFeed.length, "запись", "записи", "записей")}
+        </span>
       </div>
 
       <GratitudeFeedFilters
         filter={filter}
-        onChange={(nextFilter) => {
-          setFilter(nextFilter);
-          setVisibleCount(6);
-        }}
+        onChange={setFilter}
       />
 
       {loading ? (
@@ -502,9 +494,9 @@ function GratitudeFeedPanel({
             <div className="gratitude-skeleton-card" key={`gratitude-skeleton-${index}`} />
           ))}
         </div>
-      ) : visibleFeed.length > 0 ? (
+      ) : filteredFeed.length > 0 ? (
         <div className="gratitude-card-list">
-          {visibleFeed.map((post) => (
+          {filteredFeed.map((post) => (
             <GratitudeCard currentUser={currentUser} key={post.id} onReact={onReact} post={post} />
           ))}
         </div>
@@ -514,12 +506,6 @@ function GratitudeFeedPanel({
           <p>Когда сотрудники будут благодарить друг друга, записи появятся здесь</p>
         </div>
       )}
-
-      {!loading && visibleCount < filteredFeed.length ? (
-        <button className="action-button secondary history-more-button" onClick={() => setVisibleCount((count) => count + 6)} type="button">
-          Показать ещё
-        </button>
-      ) : null}
     </article>
   );
 }

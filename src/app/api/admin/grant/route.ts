@@ -8,12 +8,13 @@ export async function POST(request: NextRequest) {
       actorId: string;
       employeeIds: string[];
       coins: number;
+      operation?: "grant" | "deduct";
       reason?: string;
     };
     const snapshot = await grantCoins(body);
     return NextResponse.json(snapshot);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Не удалось начислить коины.";
+    const message = error instanceof Error ? error.message : "Не удалось выполнить операцию с мерчиками.";
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }
